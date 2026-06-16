@@ -9,7 +9,7 @@ from app.models.project import Project
 from app.repositories.project import ProjectRepository
 
 
-class ProjectQueryHandler(BaseQueryHandler[Project, UUID]):
+class ProjectQueryHandler(BaseQueryHandler[Project, UUID, ProjectRepository]):
     def __init__(self, session: Session) -> None:
         super().__init__(session, ProjectRepository(session))
 

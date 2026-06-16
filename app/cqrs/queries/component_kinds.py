@@ -7,7 +7,7 @@ from app.models.component_kind import ComponentKind
 from app.repositories.component_kind import ComponentKindRepository
 
 
-class ComponentKindQueryHandler(BaseQueryHandler[ComponentKind, UUID]):
+class ComponentKindQueryHandler(BaseQueryHandler[ComponentKind, UUID, ComponentKindRepository]):
     def __init__(self, session: Session) -> None:
         super().__init__(session, ComponentKindRepository(session))
 

@@ -8,17 +8,18 @@ from app.repositories.base import Repository
 
 ModelT = TypeVar("ModelT", bound=BaseModel[Any])
 IdT = TypeVar("IdT")
+RepoT = TypeVar("RepoT", bound=Repository[Any, Any])
 
 
-class BaseQueryHandler(Generic[ModelT, IdT]):
+class BaseQueryHandler(Generic[ModelT, IdT, RepoT]):
     """Read-side CQRS handler with standard lookups by base model fields."""
 
-    def __init__(self, session: Session, repository: Repository[ModelT, IdT]) -> None:
+    def __init__(self, session: Session, repository: RepoT) -> None:
         self._session = session
         self._repository = repository
 
     @property
-    def repository(self) -> Repository[ModelT, IdT]:
+    def repository(self) -> RepoT:
         return self._repository
 
     def get_by_id(self, entity_id: IdT) -> ModelT | None:

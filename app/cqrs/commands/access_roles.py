@@ -7,6 +7,6 @@ from app.models.access_role import AccessRole
 from app.repositories.access_role import AccessRoleRepository
 
 
-class AccessRoleCommandHandler(BaseCommandHandler[AccessRole, UUID]):
+class AccessRoleCommandHandler(BaseCommandHandler[AccessRole, UUID, AccessRoleRepository]):
     def __init__(self, session: Session) -> None:
         super().__init__(session, AccessRoleRepository(session))

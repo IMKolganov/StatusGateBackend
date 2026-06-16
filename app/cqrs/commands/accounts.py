@@ -7,7 +7,7 @@ from app.models.account import Account
 from app.repositories.account import AccountRepository
 
 
-class AccountCommandHandler(BaseCommandHandler[Account, UUID]):
+class AccountCommandHandler(BaseCommandHandler[Account, UUID, AccountRepository]):
     def __init__(self, session: Session) -> None:
         super().__init__(session, AccountRepository(session))
 
