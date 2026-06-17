@@ -44,9 +44,28 @@ class PublicStatusService:
         self._session = session
         self._project_queries = ProjectQueryHandler(session)
 
-    def list_projects(self, *, limit: int = 100) -> list[PublicProjectSummary]:
+    def list_projects(self, *, limit: int = 100, days: int = 90) -> list[PublicProjectSummary]:
         result = self._project_queries.list_active_paginated(PaginationParams(offset=0, limit=limit))
-        return [PublicProjectSummary.model_validate(project) for project in result.items]
+        range_end = datetime.now(UTC).date()
+        range_start = range_end - timedelta(days=days - 1)
+        day_keys = _date_range(range_start, range_end)
+
+        summaries: list[PublicProjectSummary] = []
+        for project in result.items:
+            components = self._load_components(project.id)
+            component_ids = [component.id for component in components]
+            checks_by_component_day = self._checks_by_component_day(component_ids, range_start, range_end)
+            project_day_statuses = _project_day_statuses(component_ids, day_keys, checks_by_component_day)
+            summaries.append(
+                PublicProjectSummary(
+                    id=project.id,
+                    name=project.name,
+                    slug=project.slug,
+                    description=project.description,
+                    uptime_percent=_uptime_percent(list(project_day_statuses.values())),
+                )
+            )
+        return summaries
 
     def get_project_status(self, slug: str) -> PublicProjectStatus:
         project = self._project_queries.get_by_slug(slug)
@@ -105,7 +124,14 @@ class PublicStatusService:
         for kind_name in sorted(groups_map):
             kind_components = sorted(groups_map[kind_name], key=lambda item: item.name.lower())
             service_timelines: list[PublicServiceTimeline] = []
-            group_day_statuses: dict[date, str] = {day: "no_data" for day in day_keys}
+            group_day_statuses = {
+                day: status
+                for day, status in _project_day_statuses(
+                    [component.id for component in kind_components],
+                    day_keys,
+                    checks_by_component_day,
+                ).items()
+            }
 
             for component in kind_components:
                 service_days: list[PublicDayBar] = []
@@ -115,7 +141,6 @@ class PublicStatusService:
                     outcomes = checks_by_component_day.get((component.id, day), [])
                     day_status = _status_from_outcomes(outcomes)
                     service_statuses.append(day_status)
-                    group_day_statuses[day] = _merge_status(group_day_statuses[day], day_status)
                     service_days.append(
                         _build_day_bar(
                             day=day,
@@ -331,6 +356,20 @@ def _status_from_outcomes(outcomes: list[str]) -> str:
     if any(outcome in DEGRADED_OUTCOMES for outcome in outcomes):
         return "degraded"
     return "operational"
+
+
+def _project_day_statuses(
+    component_ids: list[UUID],
+    day_keys: list[date],
+    checks_by_component_day: dict[tuple[UUID, date], list[str]],
+) -> dict[date, str]:
+    project_day_statuses: dict[date, str] = {day: "no_data" for day in day_keys}
+    for component_id in component_ids:
+        for day in day_keys:
+            outcomes = checks_by_component_day.get((component_id, day), [])
+            day_status = _status_from_outcomes(outcomes)
+            project_day_statuses[day] = _merge_status(project_day_statuses[day], day_status)
+    return project_day_statuses
 
 
 def _merge_status(current: str, incoming: str) -> str:

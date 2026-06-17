@@ -11,6 +11,7 @@ class PublicProjectSummary(BaseModel):
     name: str
     slug: str
     description: str | None
+    uptime_percent: float | None = None
 
 
 class PublicServiceStatus(BaseModel):
