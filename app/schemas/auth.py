@@ -52,6 +52,7 @@ class AccountResponse(BaseModel):
     id: str
     email: str
     full_name: str | None
+    avatar_url: str | None = None
     access_roles: list[str]
     is_totp_enabled: bool
     has_password: bool

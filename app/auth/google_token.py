@@ -39,8 +39,10 @@ def verify_google_id_token(credential: str) -> dict[str, str]:
     if not sub or not email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google profile not available")
 
+    picture = data.get("picture")
     return {
         "sub": str(sub),
         "email": str(email),
         "name": str(data["name"]) if data.get("name") else None,
+        "picture": str(picture) if picture else None,
     }

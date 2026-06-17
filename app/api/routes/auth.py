@@ -45,6 +45,7 @@ def _upsert_google_user(
         google_sub=userinfo["sub"],
         email=userinfo["email"],
         full_name=userinfo.get("name"),
+        avatar_url=userinfo.get("picture"),
     )
 
 

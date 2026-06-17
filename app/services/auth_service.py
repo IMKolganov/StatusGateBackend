@@ -137,7 +137,14 @@ class AuthService:
         account.is_totp_enabled = False
         return self._account_commands.update(account)
 
-    def upsert_google_account(self, *, google_sub: str, email: str, full_name: str | None) -> tuple[Account, str | None, str | None]:
+    def upsert_google_account(
+        self,
+        *,
+        google_sub: str,
+        email: str,
+        full_name: str | None,
+        avatar_url: str | None = None,
+    ) -> tuple[Account, str | None, str | None]:
         account = self._account_queries.get_by_google_sub(google_sub)
         if account is None:
             account = self._account_queries.get_by_email(email.lower())
@@ -156,13 +163,13 @@ class AuthService:
                 email=email.lower(),
                 google_sub=google_sub,
                 full_name=full_name,
+                avatar_url=avatar_url,
             )
             account.access_roles.append(access_role)
             account = self._account_commands.create(account)
         else:
             account.google_sub = google_sub
-            if full_name and not account.full_name:
-                account.full_name = full_name
+            account = self.apply_google_profile(account, full_name=full_name, avatar_url=avatar_url)
             account = self._account_commands.update(account)
 
         if not account.is_active:
@@ -173,6 +180,18 @@ class AuthService:
 
         access_token, refresh_token = self.issue_tokens(account)
         return account, access_token, refresh_token
+
+    @staticmethod
+    def apply_google_profile(
+        account: Account,
+        *,
+        full_name: str | None,
+        avatar_url: str | None,
+    ) -> Account:
+        if full_name:
+            account.full_name = full_name
+        account.avatar_url = avatar_url
+        return account
 
     def issue_tokens(self, account: Account) -> tuple[str, str]:
         access_token = create_access_token(account.id, self._access_role_slugs(account))
@@ -185,6 +204,7 @@ class AuthService:
             id=str(account.id),
             email=account.email,
             full_name=account.full_name,
+            avatar_url=account.avatar_url,
             access_roles=[role.slug for role in account.access_roles],
             is_totp_enabled=account.is_totp_enabled,
             has_password=account.password_hash is not None,

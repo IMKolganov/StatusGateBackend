@@ -28,6 +28,7 @@ class Account(BaseModel[UUID]):
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     google_sub: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_totp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
