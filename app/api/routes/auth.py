@@ -1,17 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from starlette.requests import Request as StarletteRequest
 
 from app.api.deps import get_auth_service, get_current_account, get_db
 from app.auth.cookies import clear_auth_cookies, get_refresh_token_from_request, set_auth_cookies
-from app.auth.oauth import oauth
+from app.auth.google_token import verify_google_id_token
 from app.config import settings
 from app.cqrs.queries.accounts import AccountQueryHandler
 from app.models.account import Account
 from app.schemas.auth import (
     AccountResponse,
+    GoogleLoginRequest,
     LinkPasswordRequest,
     LoginRequest,
     RegistrationStatusResponse,
@@ -37,12 +37,25 @@ def _auth_json_response(account: Account, auth_service: AuthService, access_toke
     return response
 
 
+def _upsert_google_user(
+    userinfo: dict[str, str | None],
+    auth_service: AuthService,
+) -> tuple[Account, str | None, str | None]:
+    return auth_service.upsert_google_account(
+        google_sub=userinfo["sub"],
+        email=userinfo["email"],
+        full_name=userinfo.get("name"),
+    )
+
+
 @router.get("/registration-status", response_model=RegistrationStatusResponse)
 def registration_status(db=Depends(get_db)) -> RegistrationStatusResponse:
     count = AccountQueryHandler(db).count_all()
     return RegistrationStatusResponse(
         allow_registration=settings.allow_registration or count == 0,
         require_email_verification=settings.require_email_verification,
+        google_oauth_enabled=settings.google_oauth_enabled,
+        google_client_id=settings.google_client_id if settings.google_oauth_enabled else "",
     )
 
 
@@ -125,36 +138,22 @@ def link_password(
     return auth_service.to_account_response(updated)
 
 
-@router.get("/google/login")
-async def google_login(request: StarletteRequest):
-    if not settings.google_client_id or not settings.google_client_secret:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Google OAuth is not configured")
-    return await oauth.google.authorize_redirect(request, settings.google_redirect_uri)
-
-
-@router.get("/google/callback")
-async def google_callback(request: Request, auth_service: AuthService = Depends(get_auth_service)):
-    if not settings.google_client_id or not settings.google_client_secret:
+@router.post("/google-login")
+def google_login(
+    payload: GoogleLoginRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    if not settings.google_oauth_enabled:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Google OAuth is not configured")
 
-    token = await oauth.google.authorize_access_token(request)
-    userinfo = token.get("userinfo")
-    if not userinfo:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google profile not available")
-
-    account, access_or_mfa, refresh_token = auth_service.upsert_google_account(
-        google_sub=userinfo["sub"],
-        email=userinfo["email"],
-        full_name=userinfo.get("name"),
-    )
+    userinfo = verify_google_id_token(payload.id_token)
+    account, access_or_mfa, refresh_token = _upsert_google_user(userinfo, auth_service)
 
     if account.is_totp_enabled and access_or_mfa and refresh_token is None:
-        return RedirectResponse(f"{settings.frontend_url}/login?mfa_token={access_or_mfa}")
-
-    response = RedirectResponse(f"{settings.frontend_url}/auth/callback")
+        return MfaRequiredResponse(mfa_token=access_or_mfa)
     if access_or_mfa and refresh_token:
-        set_auth_cookies(response, access_token=access_or_mfa, refresh_token=refresh_token)
-    return response
+        return _auth_json_response(account, auth_service, access_or_mfa, refresh_token)
+    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Authentication failed")
 
 
 @router.post("/2fa/setup", response_model=TwoFactorSetupResponse)

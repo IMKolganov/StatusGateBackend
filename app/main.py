@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from slowapi.middleware import SlowAPIMiddleware
-from starlette.middleware.sessions import SessionMiddleware
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -25,7 +24,6 @@ app.add_middleware(GlobalExceptionMiddleware)
 app.add_middleware(TraceIdMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(RequireHttpsMiddleware)
-app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],

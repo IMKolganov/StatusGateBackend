@@ -53,6 +53,30 @@ class TestAuthRegistration:
         status = _data(response)
         assert status["allow_registration"] is True
         assert status["require_email_verification"] is False
+        assert status["google_oauth_enabled"] is False
+        assert status["google_client_id"] == ""
+
+
+class TestGoogleLogin:
+    def test_google_login_disabled_returns_503(self, client: TestClient) -> None:
+        response = client.post("/api/auth/google-login", json={"idToken": "fake-token"})
+        assert response.status_code == 503
+
+    def test_google_login_sets_session_cookie(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("app.config.settings.google_client_id", "test-client.apps.googleusercontent.com")
+        monkeypatch.setattr("app.config.settings.google_client_secret", "test-secret")
+
+        def fake_verify(_token: str) -> dict[str, str | None]:
+            return {"sub": "google-sub-1", "email": "google@example.com", "name": "Google User"}
+
+        monkeypatch.setattr("app.api.routes.auth.verify_google_id_token", fake_verify)
+
+        response = client.post("/api/auth/google-login", json={"idToken": "fake-token"})
+        assert response.status_code == 200
+        assert "sg_access_token" in response.cookies
+        account = _data(response)
+        assert account["email"] == "google@example.com"
+        assert account["has_google"] is True
 
 
 class TestAuthLogin:

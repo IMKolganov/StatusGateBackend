@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
@@ -33,6 +33,14 @@ class LinkPasswordRequest(BaseModel):
 class RegistrationStatusResponse(BaseModel):
     allow_registration: bool
     require_email_verification: bool
+    google_oauth_enabled: bool
+    google_client_id: str = ""
+
+
+class GoogleLoginRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id_token: str = Field(min_length=1, alias="idToken")
 
 
 class MfaRequiredResponse(BaseModel):

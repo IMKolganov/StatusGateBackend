@@ -40,7 +40,6 @@ class Settings(BaseSettings):
 
     google_client_id: str = ""
     google_client_secret: str = ""
-    google_redirect_uri: str = "http://localhost:8000/api/auth/google/callback"
 
     totp_issuer: str = "StatusGate"
 
@@ -57,6 +56,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() in {"production", "prod"}
+
+    @property
+    def google_oauth_enabled(self) -> bool:
+        return bool(self.google_client_id.strip() and self.google_client_secret.strip())
 
 
 settings = Settings()
