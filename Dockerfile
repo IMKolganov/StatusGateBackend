@@ -9,6 +9,7 @@ RUN apt-get update \
         libpq5 \
         openvpn \
         iproute2 \
+        iputils-ping \
         curl \
         unzip \
         ca-certificates \
