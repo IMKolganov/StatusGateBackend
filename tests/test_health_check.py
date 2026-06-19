@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -129,3 +130,59 @@ class TestMonitoringApi:
         )
         assert patch.status_code == 200
         assert patch.json()["data"]["default_poll_interval_seconds"] == 120
+
+    def test_purge_check_history(self, client: TestClient, admin_headers: dict, db_session) -> None:
+        from app.models.check_result import CheckResult
+        from app.models.enums import CheckOutcome
+
+        project = client.post(
+            "/api/admin/projects",
+            json={"name": "Purge me", "slug": "purge-me", "description": None, "is_active": True},
+        ).json()["data"]
+        kind = client.post(
+            "/api/admin/component-kinds",
+            json={"name": "API", "slug": "api-purge", "description": None},
+        ).json()["data"]
+        component = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": kind["id"],
+                "name": "Health",
+                "slug": "health-purge",
+                "check_url": "https://httpbin.org/status/200",
+                "check_type": "http_status",
+                "check_method": "GET",
+                "expected_status_code": 200,
+                "timeout_seconds": 10,
+                "is_active": True,
+            },
+        ).json()["data"]
+
+        for idx in range(5):
+            db_session.add(
+                CheckResult(
+                    monitored_component_id=component["id"],
+                    checked_at=datetime.now(UTC),
+                    outcome=CheckOutcome.UP.value,
+                    latency_ms=100 + idx,
+                )
+            )
+        db_session.commit()
+
+        response = client.delete(
+            f"/api/admin/monitoring/monitored-components/{component['id']}/check-results",
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()["data"]
+        assert body["deleted_count"] == 5
+        assert body["remaining_count"] == 0
+
+        listed = client.get(
+            "/api/admin/monitored-components",
+            params={"project_id": project["id"]},
+            headers=admin_headers,
+        )
+        item = next(row for row in listed.json()["data"]["items"] if row["id"] == component["id"])
+        assert item["latest_outcome"] is None

@@ -6,10 +6,11 @@ from sqlalchemy.orm import Session
 from app.cqrs.common import PaginatedResult, PaginationParams
 from app.models.check_result import CheckResult
 from app.models.monitored_component import MonitoredComponent
-from app.schemas.monitoring import MonitoringSettingsResponse, MonitoringSettingsUpdate
+from app.schemas.monitoring import MonitoringSettingsResponse, MonitoringSettingsUpdate, PurgeCheckHistoryResponse
 from app.schemas.monitored_component import MonitoredComponentResponse
 from app.services.catalog_service import MonitoredComponentService
 from app.services.monitoring_service import CheckResultRepository, HealthCheckRunner, MonitoringSettingsRepository
+from app.services.vpn_check_service import public_network_summary
 
 
 class MonitoringAdminService:
@@ -58,6 +59,12 @@ class MonitoringAdminService:
             limit=params.limit,
         )
 
+    def purge_check_history(self, component_id: UUID, *, keep: int = 0) -> PurgeCheckHistoryResponse:
+        self._component_service.get(component_id)
+        deleted, remaining = self._results_repo.purge_for_component(component_id, keep=keep)
+        self._session.commit()
+        return PurgeCheckHistoryResponse(deleted_count=deleted, remaining_count=remaining)
+
     @staticmethod
     def _latest_diagnostics(latest: CheckResult) -> tuple[str | None, str | None]:
         log_tail = None
@@ -77,6 +84,7 @@ class MonitoringAdminService:
             error_message, log_tail = MonitoringAdminService._latest_diagnostics(latest)
             response.latest_error_message = error_message
             response.latest_log_tail = log_tail
+            response.latest_network_summary = public_network_summary(latest.details)
         return response
 
     def enrich_components(self, components: list[MonitoredComponent]) -> list[MonitoredComponentResponse]:
