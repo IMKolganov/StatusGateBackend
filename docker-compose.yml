@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-statusgate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-statusgate}
+      POSTGRES_DB: ${POSTGRES_DB:-statusgate}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-statusgate} -d ${POSTGRES_DB:-statusgate}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-statusgate}:${POSTGRES_PASSWORD:-statusgate}@db:5432/${POSTGRES_DB:-statusgate}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      APP_ENV: ${APP_ENV:-development}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
+      REQUIRE_HTTPS: ${REQUIRE_HTTPS:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      AUTH_LOGIN_RATE_LIMIT: ${AUTH_LOGIN_RATE_LIMIT:-5/minute}
+      DEFAULT_POLL_INTERVAL_SECONDS: ${DEFAULT_POLL_INTERVAL_SECONDS:-60}
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-30}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: sh -c "alembic upgrade head && python -m app.worker"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-statusgate}:${POSTGRES_PASSWORD:-statusgate}@db:5432/${POSTGRES_DB:-statusgate}
+      APP_ENV: ${APP_ENV:-development}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      DEFAULT_POLL_INTERVAL_SECONDS: ${DEFAULT_POLL_INTERVAL_SECONDS:-60}
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-30}
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+volumes:
+  pgdata:
