@@ -96,5 +96,6 @@ class MonitoredComponentResponse(BaseModel):
     latest_checked_at: datetime | None = None
     latest_error_message: str | None = None
     latest_log_tail: str | None = None
+    latest_network_summary: dict | None = None
     created_at: datetime
     updated_at: datetime

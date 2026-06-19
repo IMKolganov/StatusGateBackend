@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.check_result import CheckResult
@@ -76,6 +76,36 @@ class CheckResultRepository:
         )
         results = self._session.scalars(stmt).all()
         return {result.monitored_component_id: result for result in results}
+
+    def count_for_component(self, component_id: UUID) -> int:
+        stmt = select(func.count()).select_from(CheckResult).where(
+            CheckResult.monitored_component_id == component_id
+        )
+        return self._session.scalar(stmt) or 0
+
+    def purge_for_component(self, component_id: UUID, *, keep: int = 0) -> tuple[int, int]:
+        if keep < 0:
+            raise ValueError("keep must be non-negative")
+
+        total = self.count_for_component(component_id)
+        if total == 0 or keep >= total:
+            return 0, total
+
+        keep_ids = (
+            select(CheckResult.id)
+            .where(CheckResult.monitored_component_id == component_id)
+            .order_by(CheckResult.checked_at.desc())
+            .limit(keep)
+        )
+        delete_stmt = (
+            delete(CheckResult)
+            .where(CheckResult.monitored_component_id == component_id)
+            .where(CheckResult.id.not_in(keep_ids))
+        )
+        result = self._session.execute(delete_stmt)
+        deleted = result.rowcount or 0
+        remaining = total - deleted
+        return deleted, remaining
 
 
 class HealthCheckRunner:

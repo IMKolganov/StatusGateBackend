@@ -10,6 +10,7 @@ from app.schemas.monitoring import (
     CheckResultResponse,
     MonitoringSettingsResponse,
     MonitoringSettingsUpdate,
+    PurgeCheckHistoryResponse,
 )
 from app.schemas.monitored_component import MonitoredComponentResponse
 from app.schemas.pagination import paginated_of
@@ -60,3 +61,16 @@ def list_check_results(
 ):
     result = service.list_check_results(component_id, PaginationParams(offset=offset, limit=limit))
     return to_paginated_response(result, CheckResultResponse.model_validate)
+
+
+@router.delete(
+    "/monitored-components/{component_id}/check-results",
+    response_model=PurgeCheckHistoryResponse,
+)
+def purge_check_history(
+    component_id: UUID,
+    keep: int = Query(0, ge=0, le=10_000),
+    _=Depends(require_access_roles("admin", "operator")),
+    service: MonitoringAdminService = Depends(get_monitoring_admin_service),
+) -> PurgeCheckHistoryResponse:
+    return service.purge_check_history(component_id, keep=keep)
