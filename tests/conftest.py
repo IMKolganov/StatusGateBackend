@@ -28,6 +28,7 @@ from app.api.routes.auth import limiter
 from app.main import app
 from app.models import Base
 from app.models.access_role import AccessRole
+from app.models.component_kind import DEFAULT_COMPONENT_KINDS, ComponentKind
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 
 limiter.enabled = False
@@ -78,6 +79,14 @@ def _seed_monitoring_settings(session: Session) -> None:
     session.commit()
 
 
+def _seed_component_kinds(session: Session) -> None:
+    for kind_id, name, slug, description in DEFAULT_COMPONENT_KINDS:
+        exists = session.get(ComponentKind, kind_id)
+        if exists is None:
+            session.add(ComponentKind(id=kind_id, name=name, slug=slug, description=description))
+    session.commit()
+
+
 def _truncate_all(session: Session) -> None:
     table_names = ", ".join(f'"{table.name}"' for table in reversed(Base.metadata.sorted_tables))
     session.execute(text(f"TRUNCATE {table_names} RESTART IDENTITY CASCADE"))
@@ -101,6 +110,7 @@ def db_session(engine: Engine) -> Generator[Session, None, None]:
     _truncate_all(session)
     _seed_access_roles(session)
     _seed_monitoring_settings(session)
+    _seed_component_kinds(session)
     try:
         yield session
     finally:

@@ -154,8 +154,13 @@ class TestProjectsApi:
 
 
 class TestComponentKindsApi:
+    def test_default_component_kinds_seeded(self, client: TestClient, admin_headers: dict) -> None:
+        response = client.get("/api/admin/component-kinds")
+        assert response.status_code == 200
+        slugs = {item["slug"] for item in _data(response)["items"]}
+        assert {"web", "openvpn", "xray"}.issubset(slugs)
+
     def test_duplicate_kind_slug_rejected(self, client: TestClient, admin_headers: dict) -> None:
-        _create_kind(client, slug="web")
         response = client.post(
             "/api/admin/component-kinds",
             json={"name": "Web duplicate", "slug": "web", "description": None},
