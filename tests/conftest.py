@@ -1,5 +1,6 @@
 import os
 from collections.abc import Generator
+from urllib.parse import urlparse
 from uuid import UUID
 
 import psycopg
@@ -46,14 +47,33 @@ ACCESS_ROLES = [
 ]
 
 
+def _postgres_admin_dsn(database_url: str) -> str:
+    normalized = database_url.replace("postgresql+psycopg://", "postgresql://")
+    parsed = urlparse(normalized)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    user = parsed.username or "statusgate"
+    password = parsed.password or "statusgate"
+    return f"postgresql://{user}:{password}@{host}:{port}/postgres"
+
+
+def _test_database_name(database_url: str) -> str:
+    normalized = database_url.replace("postgresql+psycopg://", "postgresql://")
+    parsed = urlparse(normalized)
+    name = (parsed.path or "/statusgate_test").lstrip("/")
+    return name or "statusgate_test"
+
+
 def _ensure_test_database() -> None:
-    admin_dsn = "postgresql://statusgate:statusgate@localhost:5432/postgres"
+    database_url = os.environ["TEST_DATABASE_URL"]
+    admin_dsn = _postgres_admin_dsn(database_url)
+    test_db_name = _test_database_name(database_url)
     try:
         with psycopg.connect(admin_dsn, autocommit=True) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", ("statusgate_test",))
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (test_db_name,))
                 if cur.fetchone() is None:
-                    cur.execute("CREATE DATABASE statusgate_test")
+                    cur.execute(f'CREATE DATABASE "{test_db_name}"')
     except psycopg.Error as exc:
         pytest.skip(f"PostgreSQL is not available for integration tests: {exc}")
 

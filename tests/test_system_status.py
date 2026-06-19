@@ -131,3 +131,62 @@ class TestPublicSystemStatus:
 
         response = client.get("/api/status/projects/hidden-timeline/system-status")
         assert response.status_code == 404
+
+    def test_public_project_status_includes_network_summary(
+        self,
+        client: TestClient,
+        admin_headers: dict,
+        db_session: Session,
+    ) -> None:
+        kinds = client.get("/api/admin/component-kinds")
+        openvpn_kind = next(item for item in _data(kinds)["items"] if item["slug"] == "openvpn")
+        project = _create_project(client, slug="vpn-status")
+        component = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": openvpn_kind["id"],
+                "name": "Norway OpenVPN",
+                "slug": "norway-openvpn",
+                "check_type": "openvpn",
+                "check_config": {"config_text": "client\ndev tun\nproto udp\nremote vpn.example.com 1194\n"},
+                "timeout_seconds": 30,
+            },
+        ).json()["data"]
+
+        checked_at = datetime.now(UTC)
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component["id"],
+                checked_at=checked_at,
+                outcome=CheckOutcome.UP.value,
+                latency_ms=1500,
+                details={
+                    "check_type": "openvpn",
+                    "network": {
+                        "interface": "tun0",
+                        "ipv4_address": "10.8.0.2",
+                        "gateway": "10.8.0.1",
+                        "dns_servers": ["1.1.1.1"],
+                        "connect_time_ms": 900,
+                        "probe": {
+                            "url": "https://ifconfig.me/ip",
+                            "exit_ip": "203.0.113.1",
+                            "latency_ms": 80,
+                            "ok": True,
+                            "status_code": 200,
+                        },
+                    },
+                },
+            )
+        )
+        db_session.commit()
+
+        response = client.get("/api/status/projects/vpn-status")
+        assert response.status_code == 200, response.text
+        body = _data(response)
+        service = next(item for item in body["services"] if item["slug"] == "norway-openvpn")
+        assert service["status"] == "up"
+        assert service["network_summary"]["interface"] == "tun0"
+        assert service["network_summary"]["ipv4_address"] == "10.8.0.2"
+        assert service["network_summary"]["exit_ip"] == "203.0.113.1"
