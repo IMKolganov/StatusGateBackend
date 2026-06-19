@@ -24,6 +24,7 @@ from app.schemas.public_status import (
     PublicServiceTimeline,
     PublicSystemStatus,
 )
+from app.services.vpn_check_service import public_network_summary
 
 OUTAGE_OUTCOMES = {
     CheckOutcome.DOWN.value,
@@ -89,6 +90,7 @@ class PublicStatusService:
                     status=latest[0] if latest else "unknown",
                     latency_ms=latest[1] if latest else None,
                     checked_at=latest[2] if latest else None,
+                    network_summary=latest[3] if latest else None,
                 )
             )
 
@@ -206,7 +208,7 @@ class PublicStatusService:
     def _latest_check_results(
         self,
         component_ids: list[UUID],
-    ) -> dict[UUID, tuple[str, int | None, datetime | None]]:
+    ) -> dict[UUID, tuple[str, int | None, datetime | None, dict | None]]:
         if not component_ids:
             return {}
 
@@ -218,7 +220,12 @@ class PublicStatusService:
         )
         rows = self._session.scalars(stmt).all()
         return {
-            row.monitored_component_id: (row.outcome, row.latency_ms, row.checked_at)
+            row.monitored_component_id: (
+                row.outcome,
+                row.latency_ms,
+                row.checked_at,
+                public_network_summary(row.details if isinstance(row.details, dict) else None),
+            )
             for row in rows
         }
 

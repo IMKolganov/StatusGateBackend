@@ -167,6 +167,24 @@ class TestComponentKindsApi:
         )
         assert response.status_code == 409
 
+    def test_openvpn_component_requires_config(self, client: TestClient, admin_headers: dict) -> None:
+        project = _create_project(client, slug="vpn-project")
+        kinds = client.get("/api/admin/component-kinds")
+        openvpn_kind = next(item for item in _data(kinds)["items"] if item["slug"] == "openvpn")
+
+        response = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": openvpn_kind["id"],
+                "name": "VPN without config",
+                "slug": "vpn-no-config",
+                "check_type": "openvpn",
+                "check_url": "https://ifconfig.me/ip",
+            },
+        )
+        assert response.status_code == 422
+
     def test_kind_in_use_cannot_be_deleted(self, client: TestClient, admin_headers: dict) -> None:
         project = _create_project(client, slug="kind-lock")
         kind = _create_kind(client, slug="locked-kind")
