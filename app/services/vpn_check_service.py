@@ -19,6 +19,8 @@ from app.models.monitored_component import MonitoredComponent
 _vpn_check_lock = threading.Lock()
 
 DEFAULT_PROBE_URL = "https://ifconfig.me/ip"
+DEFAULT_SPEED_TEST_BYTES = 524_288
+DEFAULT_SPEED_TEST_URL = f"https://speed.cloudflare.com/__down?bytes={DEFAULT_SPEED_TEST_BYTES}"
 
 
 def run_vpn_health_check(component: MonitoredComponent) -> CheckResult:
@@ -81,13 +83,17 @@ def _run_openvpn_check(component: MonitoredComponent) -> CheckResult:
 
             if iface is None:
                 log_tail = _read_tail(log_path)
+                hint = _vpn_log_hint(log_tail)
+                error_message = "OpenVPN tunnel did not come up in time"
+                if hint:
+                    error_message = f"{error_message}: {hint}"
                 return CheckResult(
                     monitored_component_id=component.id,
                     checked_at=checked_at,
                     outcome=CheckOutcome.TIMEOUT.value,
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     http_status_code=None,
-                    error_message="OpenVPN tunnel did not come up in time",
+                    error_message=error_message,
                     details={
                         "check_type": component.check_type,
                         "network": {"connect_time_ms": connect_time_ms},
@@ -102,8 +108,24 @@ def _run_openvpn_check(component: MonitoredComponent) -> CheckResult:
             probe = _probe_endpoint(probe_url, timeout=min(15, timeout))
             network["probe"] = probe
 
+            if probe.get("ok"):
+                _enrich_network_metrics(
+                    network,
+                    gateway=network.get("gateway"),
+                    proxy_url=None,
+                    iface=iface,
+                    timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+                )
+
             outcome = CheckOutcome.UP.value if probe.get("ok") else CheckOutcome.DOWN.value
             error_message = None if probe.get("ok") else probe.get("error") or "Probe through VPN failed"
+            log_tail = _read_tail(log_path)
+            details: dict[str, Any] = {
+                "check_type": component.check_type,
+                "network": network,
+            }
+            if log_tail:
+                details["log_tail"] = log_tail
 
             return CheckResult(
                 monitored_component_id=component.id,
@@ -112,13 +134,15 @@ def _run_openvpn_check(component: MonitoredComponent) -> CheckResult:
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 http_status_code=probe.get("status_code"),
                 error_message=error_message,
-                details={
-                    "check_type": component.check_type,
-                    "network": network,
-                },
+                details=details,
             )
         except Exception as exc:  # noqa: BLE001
-            return _error_result(component, str(exc), latency_ms=int((time.perf_counter() - started) * 1000))
+            log_tail = _read_tail(log_path)
+            message = str(exc)
+            hint = _vpn_log_hint(log_tail)
+            if hint:
+                message = f"{message}: {hint}"
+            return _error_result(component, message, latency_ms=int((time.perf_counter() - started) * 1000), log_tail=log_tail)
         finally:
             _terminate_process(proc, pid_path)
 
@@ -159,13 +183,17 @@ def _run_xray_check(component: MonitoredComponent) -> CheckResult:
 
             if not ready:
                 log_tail = _read_tail(log_path)
+                hint = _vpn_log_hint(log_tail)
+                error_message = "Xray proxy did not become ready in time"
+                if hint:
+                    error_message = f"{error_message}: {hint}"
                 return CheckResult(
                     monitored_component_id=component.id,
                     checked_at=checked_at,
                     outcome=CheckOutcome.TIMEOUT.value,
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     http_status_code=None,
-                    error_message="Xray proxy did not become ready in time",
+                    error_message=error_message,
                     details={
                         "check_type": component.check_type,
                         "network": {
@@ -185,8 +213,24 @@ def _run_xray_check(component: MonitoredComponent) -> CheckResult:
             probe = _probe_endpoint(probe_url, timeout=min(15, timeout), proxy_url=proxy_url)
             network["probe"] = probe
 
+            if probe.get("ok"):
+                _enrich_network_metrics(
+                    network,
+                    gateway=None,
+                    proxy_url=proxy_url,
+                    iface=None,
+                    timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+                )
+
             outcome = CheckOutcome.UP.value if probe.get("ok") else CheckOutcome.DOWN.value
             error_message = None if probe.get("ok") else probe.get("error") or "Probe through Xray proxy failed"
+            log_tail = _read_tail(log_path)
+            details: dict[str, Any] = {
+                "check_type": component.check_type,
+                "network": network,
+            }
+            if log_tail:
+                details["log_tail"] = log_tail
 
             return CheckResult(
                 monitored_component_id=component.id,
@@ -195,13 +239,15 @@ def _run_xray_check(component: MonitoredComponent) -> CheckResult:
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 http_status_code=probe.get("status_code"),
                 error_message=error_message,
-                details={
-                    "check_type": component.check_type,
-                    "network": network,
-                },
+                details=details,
             )
         except Exception as exc:  # noqa: BLE001
-            return _error_result(component, str(exc), latency_ms=int((time.perf_counter() - started) * 1000))
+            log_tail = _read_tail(log_path)
+            message = str(exc)
+            hint = _vpn_log_hint(log_tail)
+            if hint:
+                message = f"{message}: {hint}"
+            return _error_result(component, message, latency_ms=int((time.perf_counter() - started) * 1000), log_tail=log_tail)
         finally:
             _terminate_process(proc)
 
@@ -292,7 +338,113 @@ def _collect_network_details(iface: str) -> dict[str, Any]:
     if network["routes"]:
         network["gateway"] = next((route.get("gateway") for route in network["routes"] if route.get("gateway")), None)
 
+    try:
+        link_output = subprocess.check_output(["ip", "-json", "link", "show", "dev", iface], text=True, timeout=5)
+        link_rows = json.loads(link_output)
+        if link_rows:
+            network["mtu"] = link_rows[0].get("mtu")
+            network["operstate"] = link_rows[0].get("operstate")
+    except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
+        pass
+
     return network
+
+
+def _enrich_network_metrics(
+    network: dict[str, Any],
+    *,
+    gateway: str | None,
+    proxy_url: str | None,
+    iface: str | None,
+    timeout: float,
+) -> None:
+    if gateway:
+        ping = _ping_host(gateway, count=4, timeout=min(5, timeout / 2))
+        if ping:
+            ping["host"] = gateway
+            network["gateway_ping"] = ping
+
+    speed = _measure_download_speed(
+        DEFAULT_SPEED_TEST_URL,
+        proxy_url=proxy_url,
+        timeout=min(10, timeout),
+    )
+    if speed:
+        network["speed_test"] = speed
+
+    if iface and not network.get("mtu"):
+        try:
+            link_output = subprocess.check_output(["ip", "-json", "link", "show", "dev", iface], text=True, timeout=5)
+            link_rows = json.loads(link_output)
+            if link_rows:
+                network["mtu"] = link_rows[0].get("mtu")
+        except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
+            pass
+
+
+def _ping_host(host: str, *, count: int = 4, timeout: float = 5) -> dict[str, Any] | None:
+    try:
+        output = subprocess.check_output(
+            ["ping", "-c", str(count), "-W", "1", host],
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+    return _parse_ping_output(output)
+
+
+def _parse_ping_output(output: str) -> dict[str, Any] | None:
+    loss_match = re.search(r"(\d+(?:\.\d+)?)% packet loss", output)
+    rtt_match = re.search(r"rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)", output)
+    if not loss_match and not rtt_match:
+        return None
+
+    result: dict[str, Any] = {}
+    if loss_match:
+        result["loss_percent"] = float(loss_match.group(1))
+    if rtt_match:
+        result["min_ms"] = float(rtt_match.group(1))
+        result["avg_ms"] = float(rtt_match.group(2))
+        result["max_ms"] = float(rtt_match.group(3))
+        result["jitter_ms"] = float(rtt_match.group(4))
+    return result
+
+
+def _measure_download_speed(url: str, *, proxy_url: str | None, timeout: float) -> dict[str, Any] | None:
+    started = time.perf_counter()
+    bytes_read = 0
+    try:
+        client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        with httpx.Client(**client_kwargs) as client:
+            with client.stream("GET", url) as response:
+                response.raise_for_status()
+                for chunk in response.iter_bytes():
+                    bytes_read += len(chunk)
+        duration_ms = max(int((time.perf_counter() - started) * 1000), 1)
+        megabits = (bytes_read * 8) / 1_000_000
+        seconds = duration_ms / 1000
+        mbps = round(megabits / seconds, 2) if seconds > 0 else None
+        return {
+            "ok": True,
+            "url": url,
+            "bytes": bytes_read,
+            "duration_ms": duration_ms,
+            "mbps": mbps,
+        }
+    except httpx.HTTPError as exc:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        return {
+            "ok": False,
+            "url": url,
+            "bytes": bytes_read,
+            "duration_ms": duration_ms,
+            "error": str(exc),
+        }
 
 
 def _read_dns_servers() -> list[str]:
@@ -392,6 +544,32 @@ def _terminate_process(proc: subprocess.Popen[Any], pid_path: Path | None = None
                 proc.kill()
 
 
+def _vpn_log_hint(log_tail: str | None) -> str | None:
+    if not log_tail:
+        return None
+
+    for line in reversed(log_tail.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        upper = stripped.upper()
+        if "AUTH_FAILED" in upper:
+            return "Authentication failed (AUTH_FAILED)"
+        if "TLS ERROR" in upper:
+            return stripped
+        if "CANNOT RESOLVE" in upper:
+            return stripped
+        if "CONNECTION REFUSED" in upper:
+            return stripped
+        if "INACTIVITY TIMEOUT" in upper:
+            return stripped
+        if "VERIFY ERROR" in upper or "CERTIFICATE VERIFY FAILED" in upper:
+            return stripped
+        if any(marker in upper for marker in (" ERROR", " FATAL", " EXITING")):
+            return stripped
+    return None
+
+
 def _read_tail(path: Path, max_chars: int = 4000) -> str | None:
     if not path.exists():
         return None
@@ -405,7 +583,16 @@ def _mask_proxy(proxy_url: str) -> str:
     return re.sub(r"://([^:@/]+):([^@/]+)@", "://***:***@", proxy_url)
 
 
-def _error_result(component: MonitoredComponent, message: str, *, latency_ms: int | None = None) -> CheckResult:
+def _error_result(
+    component: MonitoredComponent,
+    message: str,
+    *,
+    latency_ms: int | None = None,
+    log_tail: str | None = None,
+) -> CheckResult:
+    details: dict[str, Any] = {"check_type": component.check_type}
+    if log_tail:
+        details["log_tail"] = log_tail
     return CheckResult(
         monitored_component_id=component.id,
         checked_at=datetime.now(UTC),
@@ -413,7 +600,7 @@ def _error_result(component: MonitoredComponent, message: str, *, latency_ms: in
         latency_ms=latency_ms,
         http_status_code=None,
         error_message=message,
-        details={"check_type": component.check_type},
+        details=details,
     )
 
 
@@ -425,16 +612,25 @@ def public_network_summary(details: dict[str, Any] | None) -> dict[str, Any] | N
         return None
 
     probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
+    gateway_ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
+    speed_test = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
     summary = {
         "interface": network.get("interface"),
         "ipv4_address": network.get("ipv4_address"),
         "gateway": network.get("gateway"),
         "dns_servers": network.get("dns_servers"),
+        "mtu": network.get("mtu"),
         "connect_time_ms": network.get("connect_time_ms"),
         "proxy_url": network.get("proxy_url"),
         "inbound_protocol": network.get("inbound_protocol"),
         "probe_url": probe.get("url"),
         "exit_ip": probe.get("exit_ip"),
         "probe_latency_ms": probe.get("latency_ms"),
+        "gateway_ping_avg_ms": gateway_ping.get("avg_ms"),
+        "gateway_ping_loss_percent": gateway_ping.get("loss_percent"),
+        "gateway_ping_jitter_ms": gateway_ping.get("jitter_ms"),
+        "download_mbps": speed_test.get("mbps"),
+        "download_bytes": speed_test.get("bytes"),
+        "download_duration_ms": speed_test.get("duration_ms"),
     }
     return {key: value for key, value in summary.items() if value not in (None, [], "")}

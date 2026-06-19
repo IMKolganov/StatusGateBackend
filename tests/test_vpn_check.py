@@ -54,6 +54,14 @@ class TestVpnHelpers:
         masked = vpn._mask_proxy("socks5://user:secret@127.0.0.1:1080")
         assert masked == "socks5://***:***@127.0.0.1:1080"
 
+    def test_vpn_log_hint(self) -> None:
+        log = "2025-01-01 TLS Error: TLS handshake failed\n2025-01-01 Exiting due to fatal error\n"
+        assert vpn._vpn_log_hint(log) == "2025-01-01 Exiting due to fatal error"
+
+    def test_vpn_log_hint_auth_failed(self) -> None:
+        log = "AUTH: Received control message: AUTH_FAILED\n"
+        assert vpn._vpn_log_hint(log) == "Authentication failed (AUTH_FAILED)"
+
     def test_public_network_summary(self) -> None:
         details = {
             "network": {
@@ -61,11 +69,25 @@ class TestVpnHelpers:
                 "ipv4_address": "10.8.0.2",
                 "gateway": "10.8.0.1",
                 "dns_servers": ["1.1.1.1"],
+                "mtu": 1500,
                 "connect_time_ms": 1200,
                 "probe": {
                     "url": "https://ifconfig.me/ip",
                     "exit_ip": "203.0.113.1",
                     "latency_ms": 85,
+                },
+                "gateway_ping": {
+                    "host": "10.8.0.1",
+                    "avg_ms": 12.3,
+                    "loss_percent": 0.0,
+                    "jitter_ms": 1.5,
+                },
+                "speed_test": {
+                    "ok": True,
+                    "url": vpn.DEFAULT_SPEED_TEST_URL,
+                    "bytes": 524288,
+                    "duration_ms": 800,
+                    "mbps": 5.24,
                 },
             }
         }
@@ -75,11 +97,70 @@ class TestVpnHelpers:
             "ipv4_address": "10.8.0.2",
             "gateway": "10.8.0.1",
             "dns_servers": ["1.1.1.1"],
+            "mtu": 1500,
             "connect_time_ms": 1200,
             "probe_url": "https://ifconfig.me/ip",
             "exit_ip": "203.0.113.1",
             "probe_latency_ms": 85,
+            "gateway_ping_avg_ms": 12.3,
+            "gateway_ping_loss_percent": 0.0,
+            "gateway_ping_jitter_ms": 1.5,
+            "download_mbps": 5.24,
+            "download_bytes": 524288,
+            "download_duration_ms": 800,
         }
+
+    def test_parse_ping_output(self) -> None:
+        sample = """
+PING 10.8.0.1 (10.8.0.1) 56(84) bytes of data.
+64 bytes from 10.8.0.1: icmp_seq=1 ttl=64 time=10.2 ms
+
+--- 10.8.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3005ms
+rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
+"""
+        parsed = vpn._parse_ping_output(sample)
+        assert parsed == {
+            "loss_percent": 0.0,
+            "min_ms": 9.8,
+            "avg_ms": 10.5,
+            "max_ms": 11.2,
+            "jitter_ms": 0.45,
+        }
+
+    def test_measure_download_speed(self) -> None:
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_bytes(self):
+                yield b"x" * 1024
+
+        class FakeStream:
+            def __enter__(self):
+                return FakeResponse()
+
+            def __exit__(self, *args):
+                return False
+
+        class FakeClient:
+            def stream(self, method: str, url: str):
+                return FakeStream()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch("app.services.vpn_check_service.httpx.Client", return_value=FakeClient()):
+            with patch("app.services.vpn_check_service.time.perf_counter", side_effect=[0.0, 1.0]):
+                result = vpn._measure_download_speed("https://example.test/down", proxy_url=None, timeout=10)
+        assert result is not None
+        assert result["ok"] is True
+        assert result["bytes"] == 1024
+        assert result["duration_ms"] == 1000
+        assert result["mbps"] == 0.01
 
     def test_public_network_summary_empty(self) -> None:
         assert public_network_summary(None) is None
@@ -227,6 +308,7 @@ class TestOpenVpnCheck:
                 "app.services.vpn_check_service._probe_endpoint",
                 return_value={"ok": True, "status_code": 200, "exit_ip": "203.0.113.1", "latency_ms": 42},
             ),
+            patch("app.services.vpn_check_service._enrich_network_metrics"),
             patch("app.services.vpn_check_service._terminate_process"),
         ):
             result = run_vpn_health_check(component)
@@ -307,6 +389,7 @@ class TestXrayCheck:
                 "app.services.vpn_check_service._probe_endpoint",
                 return_value={"ok": True, "status_code": 200, "exit_ip": "198.51.100.9", "latency_ms": 55},
             ),
+            patch("app.services.vpn_check_service._enrich_network_metrics"),
             patch("app.services.vpn_check_service._terminate_process"),
             patch("builtins.open", mock_open()),
         ):
