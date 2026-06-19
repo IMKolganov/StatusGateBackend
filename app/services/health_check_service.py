@@ -6,8 +6,9 @@ from datetime import UTC, datetime
 import httpx
 
 from app.models.check_result import CheckResult
-from app.models.enums import CheckOutcome, CheckType
+from app.models.enums import VPN_CHECK_TYPES, CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
+from app.services.vpn_check_service import run_vpn_health_check
 
 _XML_PREFIX_RE = re.compile(r"^\s*(<\?xml|<[!?])", re.IGNORECASE)
 _XML_TAG_RE = re.compile(r"<\s*\w+[\s>]", re.IGNORECASE)
@@ -67,6 +68,12 @@ def _evaluate_body(component: MonitoredComponent, response: httpx.Response) -> t
 
 
 def run_health_check(component: MonitoredComponent) -> CheckResult:
+    if component.check_type in VPN_CHECK_TYPES:
+        return run_vpn_health_check(component)
+    return _run_http_health_check(component)
+
+
+def _run_http_health_check(component: MonitoredComponent) -> CheckResult:
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
 

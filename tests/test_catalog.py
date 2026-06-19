@@ -154,13 +154,84 @@ class TestProjectsApi:
 
 
 class TestComponentKindsApi:
+    def test_default_component_kinds_seeded(self, client: TestClient, admin_headers: dict) -> None:
+        response = client.get("/api/admin/component-kinds")
+        assert response.status_code == 200
+        slugs = {item["slug"] for item in _data(response)["items"]}
+        assert {"web", "openvpn", "xray"}.issubset(slugs)
+
     def test_duplicate_kind_slug_rejected(self, client: TestClient, admin_headers: dict) -> None:
-        _create_kind(client, slug="web")
         response = client.post(
             "/api/admin/component-kinds",
             json={"name": "Web duplicate", "slug": "web", "description": None},
         )
         assert response.status_code == 409
+
+    def test_openvpn_component_requires_config(self, client: TestClient, admin_headers: dict) -> None:
+        project = _create_project(client, slug="vpn-project")
+        kinds = client.get("/api/admin/component-kinds")
+        openvpn_kind = next(item for item in _data(kinds)["items"] if item["slug"] == "openvpn")
+
+        response = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": openvpn_kind["id"],
+                "name": "VPN without config",
+                "slug": "vpn-no-config",
+                "check_type": "openvpn",
+                "check_url": "https://ifconfig.me/ip",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_openvpn_component_created_with_config(self, client: TestClient, admin_headers: dict) -> None:
+        project = _create_project(client, slug="vpn-create")
+        kinds = client.get("/api/admin/component-kinds")
+        openvpn_kind = next(item for item in _data(kinds)["items"] if item["slug"] == "openvpn")
+
+        response = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": openvpn_kind["id"],
+                "name": "Norway OpenVPN",
+                "slug": "norway-openvpn",
+                "check_type": "openvpn",
+                "check_config": {"config_text": "client\ndev tun\nproto udp\nremote vpn.example.com 1194\n"},
+                "timeout_seconds": 30,
+            },
+        )
+        assert response.status_code == 201, response.text
+        body = _data(response)
+        assert body["check_type"] == "openvpn"
+        assert body["check_url"] == "https://ifconfig.me/ip"
+        assert body["check_config"]["config_text"].startswith("client")
+
+    def test_xray_component_created_with_config(self, client: TestClient, admin_headers: dict) -> None:
+        project = _create_project(client, slug="xray-create")
+        kinds = client.get("/api/admin/component-kinds")
+        xray_kind = next(item for item in _data(kinds)["items"] if item["slug"] == "xray")
+
+        response = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": xray_kind["id"],
+                "name": "Norway Xray",
+                "slug": "norway-xray",
+                "check_type": "xray",
+                "check_config": {
+                    "config_text": '{"inbounds":[{"protocol":"socks","port":1080,"listen":"127.0.0.1"}]}',
+                },
+                "check_url": "https://ifconfig.me/ip",
+                "timeout_seconds": 30,
+            },
+        )
+        assert response.status_code == 201, response.text
+        body = _data(response)
+        assert body["check_type"] == "xray"
+        assert "inbounds" in body["check_config"]["config_text"]
 
     def test_kind_in_use_cannot_be_deleted(self, client: TestClient, admin_headers: dict) -> None:
         project = _create_project(client, slug="kind-lock")

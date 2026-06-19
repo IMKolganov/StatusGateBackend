@@ -2,8 +2,20 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
+ARG XRAY_VERSION=25.6.8
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 \
+    && apt-get install -y --no-install-recommends \
+        libpq5 \
+        openvpn \
+        iproute2 \
+        curl \
+        unzip \
+        ca-certificates \
+    && curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" -o /tmp/xray.zip \
+    && unzip -q /tmp/xray.zip xray -d /usr/local/bin \
+    && chmod +x /usr/local/bin/xray \
+    && rm /tmp/xray.zip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

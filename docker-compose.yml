@@ -19,6 +19,10 @@ services:
   backend:
     build: .
     restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
@@ -45,6 +49,10 @@ services:
   worker:
     build: .
     restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     command: sh -c "alembic upgrade head && python -m app.worker"
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-statusgate}:${POSTGRES_PASSWORD:-statusgate}@db:5432/${POSTGRES_DB:-statusgate}
