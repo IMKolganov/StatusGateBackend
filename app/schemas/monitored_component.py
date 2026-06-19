@@ -94,5 +94,7 @@ class MonitoredComponentResponse(BaseModel):
     latest_outcome: str | None = None
     latest_latency_ms: int | None = None
     latest_checked_at: datetime | None = None
+    latest_error_message: str | None = None
+    latest_log_tail: str | None = None
     created_at: datetime
     updated_at: datetime

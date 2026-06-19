@@ -59,12 +59,24 @@ class MonitoringAdminService:
         )
 
     @staticmethod
+    def _latest_diagnostics(latest: CheckResult) -> tuple[str | None, str | None]:
+        log_tail = None
+        if isinstance(latest.details, dict):
+            raw = latest.details.get("log_tail")
+            if isinstance(raw, str) and raw.strip():
+                log_tail = raw
+        return latest.error_message, log_tail
+
+    @staticmethod
     def enrich_component(component: MonitoredComponent, latest: CheckResult | None) -> MonitoredComponentResponse:
         response = MonitoredComponentResponse.model_validate(component)
         if latest is not None:
             response.latest_outcome = latest.outcome
             response.latest_latency_ms = latest.latency_ms
             response.latest_checked_at = latest.checked_at
+            error_message, log_tail = MonitoringAdminService._latest_diagnostics(latest)
+            response.latest_error_message = error_message
+            response.latest_log_tail = log_tail
         return response
 
     def enrich_components(self, components: list[MonitoredComponent]) -> list[MonitoredComponentResponse]:
