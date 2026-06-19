@@ -26,3 +26,8 @@ class MonitoringSettingsResponse(BaseModel):
 class MonitoringSettingsUpdate(BaseModel):
     default_poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
     scheduler_interval_seconds: int | None = Field(default=None, ge=5, le=3600)
+
+
+class PurgeCheckHistoryResponse(BaseModel):
+    deleted_count: int
+    remaining_count: int
