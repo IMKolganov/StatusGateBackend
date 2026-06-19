@@ -49,6 +49,10 @@ class PublicDayBar(BaseModel):
     date: date
     status: str = Field(description="operational, degraded, outage, or no_data")
     tooltip: str
+    check_count: int = 0
+    failed_count: int = 0
+    degraded_count: int = 0
+    availability_percent: float | None = None
     incidents: list[PublicDayIncident] = []
 
 

@@ -38,6 +38,8 @@ ACTIVE_INCIDENT_STATUSES = {
     IncidentUpdateStatus.MONITORING.value,
 }
 STATUS_PRIORITY = {"outage": 3, "degraded": 2, "operational": 1, "no_data": 0}
+DAY_OPERATIONAL_MIN_AVAILABILITY = 99.0
+DAY_DEGRADED_MIN_AVAILABILITY = 90.0
 
 
 class PublicStatusService:
@@ -56,6 +58,7 @@ class PublicStatusService:
             components = self._load_components(project.id)
             component_ids = [component.id for component in components]
             checks_by_component_day = self._checks_by_component_day(component_ids, range_start, range_end)
+            project_outcomes = _collect_outcomes(component_ids, day_keys, checks_by_component_day)
             project_day_statuses = _project_day_statuses(component_ids, day_keys, checks_by_component_day)
             summaries.append(
                 PublicProjectSummary(
@@ -63,7 +66,7 @@ class PublicStatusService:
                     name=project.name,
                     slug=project.slug,
                     description=project.description,
-                    uptime_percent=_uptime_percent(list(project_day_statuses.values())),
+                    uptime_percent=_uptime_percent_from_outcomes(project_outcomes),
                 )
             )
         return summaries
@@ -137,16 +140,17 @@ class PublicStatusService:
 
             for component in kind_components:
                 service_days: list[PublicDayBar] = []
-                service_statuses: list[str] = []
+                service_outcomes: list[str] = []
 
                 for day in day_keys:
                     outcomes = checks_by_component_day.get((component.id, day), [])
+                    service_outcomes.extend(outcomes)
                     day_status = _status_from_outcomes(outcomes)
-                    service_statuses.append(day_status)
                     service_days.append(
                         _build_day_bar(
                             day=day,
                             day_status=day_status,
+                            outcomes=outcomes,
                             incidents=incidents_by_day.get(day, []),
                         )
                     )
@@ -157,15 +161,25 @@ class PublicStatusService:
                         name=component.name,
                         slug=component.slug,
                         component_kind=kind_name,
-                        uptime_percent=_uptime_percent(service_statuses),
+                        uptime_percent=_uptime_percent_from_outcomes(service_outcomes),
                         days=service_days,
                     )
                 )
 
+            group_outcomes = _collect_outcomes(
+                [component.id for component in kind_components],
+                day_keys,
+                checks_by_component_day,
+            )
             group_days = [
                 _build_day_bar(
                     day=day,
                     day_status=group_day_statuses[day],
+                    outcomes=_collect_outcomes(
+                        [component.id for component in kind_components],
+                        [day],
+                        checks_by_component_day,
+                    ),
                     incidents=incidents_by_day.get(day, []),
                 )
                 for day in day_keys
@@ -174,7 +188,7 @@ class PublicStatusService:
                 PublicComponentGroupTimeline(
                     name=kind_name,
                     component_count=len(kind_components),
-                    uptime_percent=_uptime_percent(list(group_day_statuses.values())),
+                    uptime_percent=_uptime_percent_from_outcomes(group_outcomes),
                     days=group_days,
                     services=service_timelines,
                 )
@@ -355,14 +369,44 @@ def _date_range(start: date, end: date) -> list[date]:
     return days
 
 
+def _collect_outcomes(
+    component_ids: list[UUID],
+    day_keys: list[date],
+    checks_by_component_day: dict[tuple[UUID, date], list[str]],
+) -> list[str]:
+    outcomes: list[str] = []
+    for component_id in component_ids:
+        for day in day_keys:
+            outcomes.extend(checks_by_component_day.get((component_id, day), []))
+    return outcomes
+
+
+def _day_check_counts(outcomes: list[str]) -> tuple[int, int, int, int]:
+    total = len(outcomes)
+    up = sum(1 for outcome in outcomes if outcome == CheckOutcome.UP.value)
+    degraded = sum(1 for outcome in outcomes if outcome in DEGRADED_OUTCOMES)
+    failed = sum(1 for outcome in outcomes if outcome in OUTAGE_OUTCOMES)
+    return total, up, degraded, failed
+
+
+def _availability_percent(outcomes: list[str]) -> float | None:
+    if not outcomes:
+        return None
+    total, up, degraded, _failed = _day_check_counts(outcomes)
+    return round((up + degraded) / total * 100, 2)
+
+
 def _status_from_outcomes(outcomes: list[str]) -> str:
     if not outcomes:
         return "no_data"
-    if any(outcome in OUTAGE_OUTCOMES for outcome in outcomes):
-        return "outage"
-    if any(outcome in DEGRADED_OUTCOMES for outcome in outcomes):
+
+    availability = _availability_percent(outcomes)
+    assert availability is not None
+    if availability >= DAY_OPERATIONAL_MIN_AVAILABILITY:
+        return "operational"
+    if availability >= DAY_DEGRADED_MIN_AVAILABILITY:
         return "degraded"
-    return "operational"
+    return "outage"
 
 
 def _project_day_statuses(
@@ -385,28 +429,44 @@ def _merge_status(current: str, incoming: str) -> str:
     return current
 
 
-def _uptime_percent(statuses: list[str]) -> float | None:
-    counted = [status for status in statuses if status != "no_data"]
-    if not counted:
-        return None
-    operational = sum(1 for status in counted if status == "operational")
-    return round(operational / len(counted) * 100, 2)
+def _uptime_percent_from_outcomes(outcomes: list[str]) -> float | None:
+    return _availability_percent(outcomes)
 
 
 def _build_day_bar(
     *,
     day: date,
     day_status: str,
+    outcomes: list[str],
     incidents: list[PublicDayIncident],
 ) -> PublicDayBar:
-    if incidents:
-        tooltip = f"{len(incidents)} incident{'s' if len(incidents) != 1 else ''}"
+    total, up, degraded, failed = _day_check_counts(outcomes)
+    availability = _availability_percent(outcomes)
+
+    tooltip_parts: list[str] = []
+    if total:
+        summary = f"{total} checks: {up} ok"
+        if degraded:
+            summary += f", {degraded} degraded"
+        if failed:
+            summary += f", {failed} failed"
+        tooltip_parts.append(summary)
+        if availability is not None:
+            tooltip_parts.append(f"{availability:.2f}% availability")
     else:
-        tooltip = "No incidents"
+        tooltip_parts.append("No checks")
+
+    if incidents:
+        tooltip_parts.append(f"{len(incidents)} incident{'s' if len(incidents) != 1 else ''}")
+
     return PublicDayBar(
         date=day,
         status=day_status,
-        tooltip=tooltip,
+        tooltip=" · ".join(tooltip_parts),
+        check_count=total,
+        failed_count=failed,
+        degraded_count=degraded,
+        availability_percent=availability,
         incidents=incidents,
     )
 
