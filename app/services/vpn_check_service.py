@@ -15,6 +15,7 @@ import httpx
 from app.models.check_result import CheckResult
 from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
+from app.services.xray_config import parse_xray_config_text
 
 _vpn_check_lock = threading.Lock()
 
@@ -155,9 +156,11 @@ def _run_xray_check(component: MonitoredComponent) -> CheckResult:
     timeout = component.timeout_seconds
 
     try:
-        config = json.loads(config_text)
+        config = parse_xray_config_text(config_text)
     except json.JSONDecodeError as exc:
-        return _error_result(component, f"Invalid Xray JSON config: {exc.msg}")
+        return _error_result(component, f"Invalid Xray config: {exc.msg}")
+    except ValueError as exc:
+        return _error_result(component, f"Invalid Xray config: {exc}")
 
     proxy_url = _xray_proxy_url(config)
     if proxy_url is None:

@@ -346,7 +346,7 @@ class TestXrayCheck:
         )
         result = run_vpn_health_check(component)
         assert result.outcome == CheckOutcome.ERROR.value
-        assert "Invalid Xray JSON config" in (result.error_message or "")
+        assert "Invalid Xray config" in (result.error_message or "")
 
     def test_xray_missing_inbound(self) -> None:
         component = _vpn_component(
@@ -398,6 +398,33 @@ class TestXrayCheck:
         assert result.outcome == CheckOutcome.UP.value
         assert result.details["network"]["proxy_url"] == "socks5://127.0.0.1:1080"
         assert result.details["network"]["inbound_protocol"] == "socks"
+
+    def test_xray_success_from_vless_share_link(self) -> None:
+        component = _vpn_component(
+            check_type=CheckType.XRAY.value,
+            check_config={
+                "config_text": (
+                    "vless://00000000-0000-4000-8000-000000000001@example.com:443"
+                    "?encryption=none&security=tls&sni=example.com&type=tcp"
+                ),
+            },
+        )
+        mock_proc = MagicMock()
+
+        with (
+            patch("app.services.vpn_check_service.subprocess.Popen", return_value=mock_proc),
+            patch("app.services.vpn_check_service._wait_for_proxy", return_value=True),
+            patch(
+                "app.services.vpn_check_service._probe_endpoint",
+                return_value={"ok": True, "status_code": 200, "exit_ip": "198.51.100.9", "latency_ms": 55},
+            ),
+            patch("app.services.vpn_check_service._enrich_network_metrics"),
+            patch("app.services.vpn_check_service._terminate_process"),
+            patch("builtins.open", mock_open()),
+        ):
+            result = run_vpn_health_check(component)
+
+        assert result.outcome == CheckOutcome.UP.value
 
 
 class TestHealthCheckDispatch:
