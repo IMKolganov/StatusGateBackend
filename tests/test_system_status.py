@@ -115,12 +115,63 @@ class TestPublicSystemStatus:
 
         day_by_date = {day["date"]: day for day in group["days"]}
         assert day_by_date["2026-06-15"]["status"] == "operational"
-        assert day_by_date["2026-06-15"]["tooltip"] == "No incidents"
-        assert day_by_date["2026-06-16"]["status"] == "degraded"
-        assert day_by_date["2026-06-16"]["tooltip"] == "1 incident"
+        assert "1 checks: 1 ok" in day_by_date["2026-06-15"]["tooltip"]
+        assert day_by_date["2026-06-15"]["check_count"] == 1
+        assert day_by_date["2026-06-16"]["status"] == "operational"
+        assert "1 checks" in day_by_date["2026-06-16"]["tooltip"]
+        assert "1 incident" in day_by_date["2026-06-16"]["tooltip"]
         assert len(day_by_date["2026-06-16"]["incidents"]) == 1
 
         assert len(body["active_alerts"]) >= 1
+
+    def test_single_failure_stays_operational_for_day(
+        self,
+        client: TestClient,
+        admin_headers: dict,
+        db_session: Session,
+    ) -> None:
+        kind = _create_kind(client, slug="vpn-kind")
+        project = _create_project(client, slug="vpn-uptime")
+        component = _create_component(
+            client,
+            project_id=project["id"],
+            kind_id=kind["id"],
+            slug="norway",
+            name="Norway VPN",
+        )
+
+        day = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+        for minute in range(100):
+            db_session.add(
+                CheckResult(
+                    monitored_component_id=component["id"],
+                    checked_at=day + timedelta(minutes=minute),
+                    outcome=CheckOutcome.UP.value,
+                    latency_ms=40,
+                )
+            )
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component["id"],
+                checked_at=day + timedelta(minutes=100),
+                outcome=CheckOutcome.TIMEOUT.value,
+                latency_ms=60000,
+            )
+        )
+        db_session.commit()
+
+        response = client.get(
+            "/api/status/projects/vpn-uptime/system-status",
+            params={"end": "2026-06-20", "days": 7},
+        )
+        assert response.status_code == 200, response.text
+        service = _data(response)["groups"][0]["services"][0]
+        day_bar = next(day for day in service["days"] if day["date"] == "2026-06-20")
+        assert day_bar["status"] == "operational"
+        assert day_bar["check_count"] == 101
+        assert day_bar["failed_count"] == 1
+        assert day_bar["availability_percent"] == 99.01
+        assert service["uptime_percent"] == 99.01
 
     def test_inactive_project_system_status_hidden(self, client: TestClient, admin_headers: dict) -> None:
         project = client.post(
