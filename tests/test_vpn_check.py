@@ -109,7 +109,31 @@ class TestVpnHelpers:
             download_mbps=5.24,
             download_bytes=524288,
             download_duration_ms=800,
+            speed_test_ok=True,
+            speed_test_error=None,
         )
+
+    def test_public_network_summary_failed_speed_test(self) -> None:
+        details = {
+            "network": {
+                "interface": "tun0",
+                "probe": {"url": "https://ifconfig.me/ip", "exit_ip": "203.0.113.1", "latency_ms": 85},
+                "speed_test": {
+                    "ok": False,
+                    "url": vpn._speed_test_url(DEFAULT_SPEED_TEST_BYTES),
+                    "bytes": 0,
+                    "duration_ms": 245,
+                    "error": "Connect timeout",
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps is None
+        assert summary.speed_test_ok is False
+        assert summary.speed_test_error == "Connect timeout"
+        assert summary.download_bytes == 0
+        assert summary.download_duration_ms == 245
 
     def test_parse_ping_output(self) -> None:
         sample = """

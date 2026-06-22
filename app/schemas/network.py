@@ -23,3 +23,5 @@ class NetworkSummary(BaseModel):
     download_mbps: float | None = None
     download_bytes: int | None = None
     download_duration_ms: int | None = None
+    speed_test_ok: bool | None = None
+    speed_test_error: str | None = None

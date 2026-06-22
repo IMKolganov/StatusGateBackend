@@ -633,6 +633,16 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
     probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
     gateway_ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
     speed_test = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
+    speed_test_ok: bool | None = None
+    speed_test_error: str | None = None
+    if speed_test:
+        if speed_test.get("ok") is True:
+            speed_test_ok = True
+        elif speed_test.get("ok") is False:
+            speed_test_ok = False
+            raw_error = speed_test.get("error")
+            speed_test_error = raw_error if isinstance(raw_error, str) and raw_error.strip() else "Unknown error"
+
     summary = NetworkSummary(
         interface=network.get("interface"),
         ipv4_address=network.get("ipv4_address"),
@@ -651,6 +661,8 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
         download_mbps=speed_test.get("mbps"),
         download_bytes=speed_test.get("bytes"),
         download_duration_ms=speed_test.get("duration_ms"),
+        speed_test_ok=speed_test_ok,
+        speed_test_error=speed_test_error,
     )
     if summary.model_dump(exclude_none=True):
         return summary
