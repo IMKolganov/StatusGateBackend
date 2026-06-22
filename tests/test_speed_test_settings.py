@@ -261,7 +261,39 @@ class TestEnrichNetworkMetricsSpeedTest:
         assert network["speed_test"]["mbps"] == 42.0
         assert network["speed_test"]["cached"] is True
 
+    def test_cloudflare_throttle_reuses_last_success(self) -> None:
+        from app.services.speed_test_config import reset_cloudflare_speed_test_slot_for_tests
+
+        reset_cloudflare_speed_test_slot_for_tests()
+        network: dict = {}
+        last_success = {"ok": True, "mbps": 25.0, "bytes": 524288, "duration_ms": 900}
+        context = SpeedTestRunContext(
+            url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE,
+            run_speed_test=True,
+            previous_speed_test={"ok": False, "error": "Speed test rate limited (HTTP 429)"},
+            last_successful_speed_test=last_success,
+        )
+        with (
+            patch("app.services.vpn_check_service.try_acquire_cloudflare_speed_test_slot", return_value=False),
+            patch("app.services.vpn_check_service._measure_download_speed") as measure,
+        ):
+            vpn._enrich_network_metrics(
+                network,
+                gateway=None,
+                proxy_url=None,
+                iface=None,
+                timeout=30,
+                speed_test_context=context,
+            )
+            measure.assert_not_called()
+        assert network["speed_test"]["mbps"] == 25.0
+        assert network["speed_test"]["stale"] is True
+        assert network["speed_test"]["throttled"] is True
+
     def test_runs_download_when_enabled(self) -> None:
+        from app.services.speed_test_config import reset_cloudflare_speed_test_slot_for_tests
+
+        reset_cloudflare_speed_test_slot_for_tests()
         network: dict = {}
         context = SpeedTestRunContext(url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE, run_speed_test=True)
         measured = {"ok": True, "mbps": 10.0, "bytes": 524288, "url": "https://speed.cloudflare.com/__down?bytes=524288"}
@@ -276,6 +308,7 @@ class TestEnrichNetworkMetricsSpeedTest:
             )
             measure.assert_called_once()
         assert network["speed_test"] == measured
+        assert network["speed_test_last_success"] == measured
 
 
 class TestHealthCheckRunnerSpeedTestContext:
