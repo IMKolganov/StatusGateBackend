@@ -11,6 +11,7 @@ from app.cqrs.queries.component_kinds import ComponentKindQueryHandler
 from app.cqrs.queries.monitored_components import MonitoredComponentQueryHandler
 from app.cqrs.queries.projects import ProjectQueryHandler
 from app.models.component_kind import ComponentKind
+from app.models.enums import VPN_CHECK_TYPES
 from app.models.monitored_component import MonitoredComponent
 from app.models.project import Project
 from app.schemas.component_kind import ComponentKindCreate, ComponentKindUpdate
@@ -121,6 +122,12 @@ class MonitoredComponentService:
     def update(self, component_id: UUID, payload: MonitoredComponentUpdate) -> MonitoredComponent:
         component = self.get(component_id)
         data = payload.model_dump(exclude_unset=True)
+        effective_check_type = data.get("check_type", component.check_type)
+        if data.get("speed_test_bytes") is not None and effective_check_type not in VPN_CHECK_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="speed_test_bytes is only supported for VPN check types",
+            )
         project_id = data.get("project_id", component.project_id)
         slug = data.get("slug", component.slug)
         if "project_id" in data and not self._project_queries.get_by_id(data["project_id"]):

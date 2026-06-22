@@ -43,6 +43,7 @@ class MonitoredComponent(BaseModel[UUID]):
         server_default=CheckType.HTTP_STATUS.value,
     )
     check_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    speed_test_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     poll_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")

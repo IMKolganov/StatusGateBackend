@@ -5,6 +5,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import VPN_CHECK_TYPES
 
+DEFAULT_SPEED_TEST_BYTES = 524_288
+MIN_SPEED_TEST_BYTES = 1_024
+MAX_SPEED_TEST_BYTES = 52_428_800
+
 
 class VpnCheckConfig(BaseModel):
     config_text: str = Field(min_length=10, max_length=200_000)
@@ -24,6 +28,7 @@ class MonitoredComponentCreate(BaseModel):
     check_method: str = Field(default="GET", max_length=10)
     check_type: str = Field(default="http_status", pattern=CHECK_TYPE_PATTERN)
     check_config: dict | None = None
+    speed_test_bytes: int | None = Field(default=None, ge=MIN_SPEED_TEST_BYTES, le=MAX_SPEED_TEST_BYTES)
     expected_status_code: int = Field(default=200, ge=100, le=599)
     timeout_seconds: int = Field(default=10, ge=1, le=300)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
@@ -45,6 +50,8 @@ class MonitoredComponentCreate(BaseModel):
             raise ValueError("check_url is required for HTTP check types")
         if self.check_config:
             raise ValueError("check_config is only supported for VPN check types")
+        if self.speed_test_bytes is not None:
+            raise ValueError("speed_test_bytes is only supported for VPN check types")
         return self
 
 
@@ -59,6 +66,7 @@ class MonitoredComponentUpdate(BaseModel):
     check_method: str | None = Field(default=None, max_length=10)
     check_type: str | None = Field(default=None, pattern=CHECK_TYPE_PATTERN)
     check_config: dict | None = None
+    speed_test_bytes: int | None = Field(default=None, ge=MIN_SPEED_TEST_BYTES, le=MAX_SPEED_TEST_BYTES)
     expected_status_code: int | None = Field(default=None, ge=100, le=599)
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
@@ -86,6 +94,7 @@ class MonitoredComponentResponse(BaseModel):
     check_method: str
     check_type: str
     check_config: dict | None
+    speed_test_bytes: int | None
     expected_status_code: int
     timeout_seconds: int
     poll_interval_seconds: int | None
