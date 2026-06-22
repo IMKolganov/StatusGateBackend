@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES, MAX_SPEED_TEST_BYTES, MonitoredComponentCreate
+from app.schemas.network import NetworkSummary
 from app.services import vpn_check_service as vpn
 from app.services.health_check_service import run_health_check
 from app.services.vpn_check_service import public_network_summary, run_vpn_health_check
@@ -92,23 +93,23 @@ class TestVpnHelpers:
             }
         }
         summary = public_network_summary(details)
-        assert summary == {
-            "interface": "tun0",
-            "ipv4_address": "10.8.0.2",
-            "gateway": "10.8.0.1",
-            "dns_servers": ["1.1.1.1"],
-            "mtu": 1500,
-            "connect_time_ms": 1200,
-            "probe_url": "https://ifconfig.me/ip",
-            "exit_ip": "203.0.113.1",
-            "probe_latency_ms": 85,
-            "gateway_ping_avg_ms": 12.3,
-            "gateway_ping_loss_percent": 0.0,
-            "gateway_ping_jitter_ms": 1.5,
-            "download_mbps": 5.24,
-            "download_bytes": 524288,
-            "download_duration_ms": 800,
-        }
+        assert summary == NetworkSummary(
+            interface="tun0",
+            ipv4_address="10.8.0.2",
+            gateway="10.8.0.1",
+            dns_servers=["1.1.1.1"],
+            mtu=1500,
+            connect_time_ms=1200,
+            probe_url="https://ifconfig.me/ip",
+            exit_ip="203.0.113.1",
+            probe_latency_ms=85,
+            gateway_ping_avg_ms=12.3,
+            gateway_ping_loss_percent=0.0,
+            gateway_ping_jitter_ms=1.5,
+            download_mbps=5.24,
+            download_bytes=524288,
+            download_duration_ms=800,
+        )
 
     def test_parse_ping_output(self) -> None:
         sample = """
