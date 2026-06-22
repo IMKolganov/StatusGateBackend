@@ -53,6 +53,7 @@ class PublicDayBar(BaseModel):
     failed_count: int = 0
     degraded_count: int = 0
     availability_percent: float | None = None
+    downtime_seconds: int = 0
     incidents: list[PublicDayIncident] = []
 
 

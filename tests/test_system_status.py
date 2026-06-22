@@ -117,6 +117,7 @@ class TestPublicSystemStatus:
         assert day_by_date["2026-06-15"]["status"] == "operational"
         assert "1 checks: 1 ok" in day_by_date["2026-06-15"]["tooltip"]
         assert day_by_date["2026-06-15"]["check_count"] == 1
+        assert day_by_date["2026-06-15"]["downtime_seconds"] == 0
         assert day_by_date["2026-06-16"]["status"] == "operational"
         assert "1 checks" in day_by_date["2026-06-16"]["tooltip"]
         assert "1 incident" in day_by_date["2026-06-16"]["tooltip"]
@@ -171,7 +172,104 @@ class TestPublicSystemStatus:
         assert day_bar["check_count"] == 101
         assert day_bar["failed_count"] == 1
         assert day_bar["availability_percent"] == 99.01
+        assert day_bar["downtime_seconds"] == 37_200
         assert service["uptime_percent"] == 99.01
+
+    def test_service_downtime_from_check_sequence(
+        self,
+        client: TestClient,
+        admin_headers: dict,
+        db_session: Session,
+    ) -> None:
+        kind = _create_kind(client, slug="downtime-kind")
+        project = _create_project(client, slug="downtime-demo")
+        component = _create_component(
+            client,
+            project_id=project["id"],
+            kind_id=kind["id"],
+            slug="api",
+            name="API",
+        )
+
+        day = datetime(2026, 6, 21, 0, 0, tzinfo=UTC)
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component["id"],
+                checked_at=day + timedelta(hours=10),
+                outcome=CheckOutcome.UP.value,
+                latency_ms=40,
+            )
+        )
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component["id"],
+                checked_at=day + timedelta(hours=10, minutes=5),
+                outcome=CheckOutcome.DOWN.value,
+                latency_ms=None,
+            )
+        )
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component["id"],
+                checked_at=day + timedelta(hours=10, minutes=35),
+                outcome=CheckOutcome.UP.value,
+                latency_ms=42,
+            )
+        )
+        db_session.commit()
+
+        response = client.get(
+            "/api/status/projects/downtime-demo/system-status",
+            params={"end": "2026-06-21", "days": 7},
+        )
+        assert response.status_code == 200, response.text
+        service = _data(response)["groups"][0]["services"][0]
+        day_bar = next(day for day in service["days"] if day["date"] == "2026-06-21")
+        assert day_bar["downtime_seconds"] == 30 * 60
+        assert day_bar["check_count"] == 3
+
+    def test_overnight_outage_carries_into_next_day(
+        self,
+        client: TestClient,
+        admin_headers: dict,
+        db_session: Session,
+    ) -> None:
+        kind = _create_kind(client, slug="overnight-kind")
+        project = _create_project(client, slug="overnight-demo")
+        component = _create_component(
+            client,
+            project_id=project["id"],
+            kind_id=kind["id"],
+            slug="api",
+            name="API",
+        )
+
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component["id"],
+                checked_at=datetime(2026, 6, 20, 23, 0, tzinfo=UTC),
+                outcome=CheckOutcome.DOWN.value,
+                latency_ms=None,
+            )
+        )
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component["id"],
+                checked_at=datetime(2026, 6, 21, 1, 0, tzinfo=UTC),
+                outcome=CheckOutcome.UP.value,
+                latency_ms=40,
+            )
+        )
+        db_session.commit()
+
+        response = client.get(
+            "/api/status/projects/overnight-demo/system-status",
+            params={"end": "2026-06-21", "days": 7},
+        )
+        assert response.status_code == 200, response.text
+        service = _data(response)["groups"][0]["services"][0]
+        day_bar = next(day for day in service["days"] if day["date"] == "2026-06-21")
+        assert day_bar["downtime_seconds"] == 3600
 
     def test_inactive_project_system_status_hidden(self, client: TestClient, admin_headers: dict) -> None:
         project = client.post(
