@@ -1,7 +1,7 @@
 """component speed test bytes
 
-Revision ID: 008
-Revises: 007
+Revision ID: 011
+Revises: 010
 Create Date: 2026-06-22
 
 """
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "008"
-down_revision: str | Sequence[str] | None = "007"
+revision: str = "011"
+down_revision: str | Sequence[str] | None = "010"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
