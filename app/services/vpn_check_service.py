@@ -10,8 +10,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from typing import Any
-
 import httpx
 
 from app.models.check_result import CheckResult
@@ -19,28 +17,32 @@ from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES
 from app.schemas.network import NetworkSummary
+from app.services.speed_test_config import (
+    SpeedTestRunContext,
+    build_speed_test_url,
+)
 from app.services.xray_config import parse_xray_config_text
 
 _vpn_check_lock = threading.Lock()
 
 DEFAULT_PROBE_URL = "https://ifconfig.me/ip"
-SPEED_TEST_URL_TEMPLATE = "https://speed.cloudflare.com/__down?bytes={bytes}"
 
 
 def _speed_test_bytes_for(component: MonitoredComponent) -> int:
     return component.speed_test_bytes or DEFAULT_SPEED_TEST_BYTES
 
 
-def _speed_test_url(bytes_count: int) -> str:
-    return SPEED_TEST_URL_TEMPLATE.format(bytes=bytes_count)
-
-
-def run_vpn_health_check(component: MonitoredComponent) -> CheckResult:
+def run_vpn_health_check(
+    component: MonitoredComponent,
+    *,
+    speed_test_context: SpeedTestRunContext | None = None,
+) -> CheckResult:
+    context = speed_test_context or SpeedTestRunContext.default()
     with _vpn_check_lock:
         if component.check_type == CheckType.OPENVPN.value:
-            return _run_openvpn_check(component)
+            return _run_openvpn_check(component, speed_test_context=context)
         if component.check_type == CheckType.XRAY.value:
-            return _run_xray_check(component)
+            return _run_xray_check(component, speed_test_context=context)
         return _error_result(component, f"Unsupported VPN check type: {component.check_type}")
 
 
@@ -53,7 +55,7 @@ def _config_text(component: MonitoredComponent) -> str:
     return config_text.strip()
 
 
-def _run_openvpn_check(component: MonitoredComponent) -> CheckResult:
+def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: SpeedTestRunContext) -> CheckResult:
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
     config_text = _config_text(component)
@@ -129,6 +131,7 @@ def _run_openvpn_check(component: MonitoredComponent) -> CheckResult:
                     iface=iface,
                     timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
                     speed_test_bytes=speed_test_bytes,
+                    speed_test_context=speed_test_context,
                 )
 
             outcome = CheckOutcome.UP.value if probe.get("ok") else CheckOutcome.DOWN.value
@@ -161,7 +164,7 @@ def _run_openvpn_check(component: MonitoredComponent) -> CheckResult:
             _terminate_process(proc, pid_path)
 
 
-def _run_xray_check(component: MonitoredComponent) -> CheckResult:
+def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedTestRunContext) -> CheckResult:
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
     config_text = _config_text(component)
@@ -238,6 +241,7 @@ def _run_xray_check(component: MonitoredComponent) -> CheckResult:
                     iface=None,
                     timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
                     speed_test_bytes=speed_test_bytes,
+                    speed_test_context=speed_test_context,
                 )
 
             outcome = CheckOutcome.UP.value if probe.get("ok") else CheckOutcome.DOWN.value
@@ -376,6 +380,7 @@ def _enrich_network_metrics(
     iface: str | None,
     timeout: float,
     speed_test_bytes: int = DEFAULT_SPEED_TEST_BYTES,
+    speed_test_context: SpeedTestRunContext,
 ) -> None:
     if gateway:
         ping = _ping_host(gateway, count=4, timeout=min(5, timeout / 2))
@@ -383,8 +388,15 @@ def _enrich_network_metrics(
             ping["host"] = gateway
             network["gateway_ping"] = ping
 
+    if not speed_test_context.run_speed_test:
+        if speed_test_context.previous_speed_test:
+            cached = dict(speed_test_context.previous_speed_test)
+            cached["cached"] = True
+            network["speed_test"] = cached
+        return
+
     speed = _measure_download_speed(
-        _speed_test_url(speed_test_bytes),
+        build_speed_test_url(speed_test_context.url_template, speed_test_bytes),
         proxy_url=proxy_url,
         timeout=max(5, timeout),
     )
@@ -432,6 +444,38 @@ def _parse_ping_output(output: str) -> dict[str, Any] | None:
     return result
 
 
+def _format_speed_test_error(error: Any) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code
+        if status_code == 429:
+            return "Speed test rate limited (HTTP 429)"
+        if status_code == 403:
+            return "Speed test blocked (HTTP 403)"
+        return f"Speed test failed (HTTP {status_code})"
+    if isinstance(error, httpx.TimeoutException):
+        return "Speed test timed out"
+    if isinstance(error, httpx.ConnectError):
+        return "Speed test connection failed"
+
+    message = str(error).strip() if error is not None else ""
+    if not message:
+        return "Speed test failed"
+
+    status_match = re.search(r"Client error '(\d{3})", message)
+    if status_match:
+        status_code = int(status_match.group(1))
+        if status_code == 429:
+            return "Speed test rate limited (HTTP 429)"
+        if status_code == 403:
+            return "Speed test blocked (HTTP 403)"
+        return f"Speed test failed (HTTP {status_code})"
+
+    if re.search(r"\btimeout\b", message, re.IGNORECASE):
+        return "Speed test timed out"
+
+    return "Speed test failed"
+
+
 def _measure_download_speed(url: str, *, proxy_url: str | None, timeout: float) -> dict[str, Any] | None:
     started = time.perf_counter()
     bytes_read = 0
@@ -462,7 +506,7 @@ def _measure_download_speed(url: str, *, proxy_url: str | None, timeout: float) 
             "url": url,
             "bytes": bytes_read,
             "duration_ms": duration_ms,
-            "error": str(exc),
+            "error": _format_speed_test_error(exc),
         }
 
 
@@ -641,7 +685,7 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
         elif speed_test.get("ok") is False:
             speed_test_ok = False
             raw_error = speed_test.get("error")
-            speed_test_error = raw_error if isinstance(raw_error, str) and raw_error.strip() else "Unknown error"
+            speed_test_error = _format_speed_test_error(raw_error) if raw_error else "Speed test failed"
 
     summary = NetworkSummary(
         interface=network.get("interface"),

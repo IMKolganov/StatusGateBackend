@@ -11,6 +11,7 @@ from app.schemas.monitoring import (
     MonitoringSettingsResponse,
     MonitoringSettingsUpdate,
     PurgeCheckHistoryResponse,
+    SpeedTestAdvisoryResponse,
 )
 from app.schemas.monitored_component import MonitoredComponentResponse
 from app.schemas.pagination import paginated_of
@@ -40,6 +41,15 @@ def update_monitoring_settings(
     service: MonitoringAdminService = Depends(get_monitoring_admin_service),
 ) -> MonitoringSettingsResponse:
     return service.update_settings(payload)
+
+
+@router.get("/speed-test-advisory", response_model=SpeedTestAdvisoryResponse)
+def get_speed_test_advisory(
+    project_id: UUID | None = Query(default=None),
+    _=Depends(require_access_roles("admin", "operator", "viewer")),
+    service: MonitoringAdminService = Depends(get_monitoring_admin_service),
+) -> SpeedTestAdvisoryResponse:
+    return service.get_speed_test_advisory(project_id)
 
 
 @router.post("/monitored-components/{component_id}/check", response_model=CheckResultResponse)
