@@ -59,6 +59,32 @@ class TestDowntimeCalculation:
         ]
         assert compute_downtime_seconds(events, day=day) == 0
 
+    def test_error_outcome_counts_as_downtime(self) -> None:
+        day = date(2026, 6, 20)
+        events = [
+            (datetime(2026, 6, 20, 10, 0, tzinfo=UTC), CheckOutcome.ERROR.value),
+            (datetime(2026, 6, 20, 10, 15, tzinfo=UTC), CheckOutcome.UP.value),
+        ]
+        assert compute_downtime_seconds(events, day=day) == 15 * 60
+
+    def test_consecutive_outage_events_use_first_timestamp(self) -> None:
+        day = date(2026, 6, 20)
+        events = [
+            (datetime(2026, 6, 20, 10, 0, tzinfo=UTC), CheckOutcome.DOWN.value),
+            (datetime(2026, 6, 20, 10, 5, tzinfo=UTC), CheckOutcome.TIMEOUT.value),
+            (datetime(2026, 6, 20, 10, 20, tzinfo=UTC), CheckOutcome.UP.value),
+        ]
+        assert compute_downtime_seconds(events, day=day) == 20 * 60
+
+    def test_unsorted_events_are_sorted(self) -> None:
+        day = date(2026, 6, 20)
+        events = [
+            (datetime(2026, 6, 20, 10, 35, tzinfo=UTC), CheckOutcome.UP.value),
+            (datetime(2026, 6, 20, 10, 5, tzinfo=UTC), CheckOutcome.DOWN.value),
+            (datetime(2026, 6, 20, 10, 0, tzinfo=UTC), CheckOutcome.UP.value),
+        ]
+        assert compute_downtime_seconds(events, day=day) == 30 * 60
+
     def test_multiple_outage_periods(self) -> None:
         day = date(2026, 6, 20)
         events = [
