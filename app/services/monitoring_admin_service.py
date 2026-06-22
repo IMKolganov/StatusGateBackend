@@ -6,10 +6,17 @@ from sqlalchemy.orm import Session
 from app.cqrs.common import PaginatedResult, PaginationParams
 from app.models.check_result import CheckResult
 from app.models.monitored_component import MonitoredComponent
-from app.schemas.monitoring import MonitoringSettingsResponse, MonitoringSettingsUpdate, PurgeCheckHistoryResponse
+from app.models.enums import VPN_CHECK_TYPES
+from app.schemas.monitoring import MonitoringSettingsResponse, MonitoringSettingsUpdate, PurgeCheckHistoryResponse, SpeedTestAdvisoryResponse
 from app.schemas.monitored_component import MonitoredComponentResponse
 from app.services.catalog_service import MonitoredComponentService
 from app.services.monitoring_service import CheckResultRepository, HealthCheckRunner, MonitoringSettingsRepository
+from app.services.speed_test_config import (
+    CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE,
+    estimate_speed_tests_per_minute,
+    speed_test_rate_warning,
+    uses_default_cloudflare_template,
+)
 from app.services.vpn_check_service import public_network_summary
 
 
@@ -27,6 +34,8 @@ class MonitoringAdminService:
         return MonitoringSettingsResponse(
             default_poll_interval_seconds=settings.default_poll_interval_seconds,
             scheduler_interval_seconds=settings.scheduler_interval_seconds,
+            default_speed_test_url_template=settings.default_speed_test_url_template,
+            default_speed_test_interval_seconds=settings.default_speed_test_interval_seconds,
             updated_at=settings.updated_at,
         )
 
@@ -38,6 +47,29 @@ class MonitoringAdminService:
         self._settings_repo.save(settings)
         self._session.commit()
         return self.get_settings_response()
+
+    def get_speed_test_advisory(self, project_id: UUID | None = None) -> SpeedTestAdvisoryResponse:
+        settings = self._settings_repo.get()
+        if project_id is None:
+            components = self._component_service.list(PaginationParams(offset=0, limit=1000)).items
+        else:
+            components = self._component_service.list_by_project(project_id, PaginationParams(offset=0, limit=1000)).items
+        active_vpn = [
+            component
+            for component in components
+            if component.is_active and component.check_type in VPN_CHECK_TYPES and component.speed_test_enabled
+        ]
+        per_minute = estimate_speed_tests_per_minute(active_vpn, settings)
+        uses_cloudflare = any(uses_default_cloudflare_template(component, settings) for component in active_vpn)
+        warning = speed_test_rate_warning(active_vpn, settings)
+        self._session.commit()
+        return SpeedTestAdvisoryResponse(
+            active_vpn_service_count=len(active_vpn),
+            estimated_speed_tests_per_minute=round(per_minute, 2),
+            uses_default_cloudflare_template=uses_cloudflare,
+            guidance_requests_per_minute=CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE,
+            warning=warning,
+        )
 
     def run_manual_check(self, component_id: UUID) -> CheckResult:
         component = self._component_service.get(component_id)

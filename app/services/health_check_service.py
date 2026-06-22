@@ -8,6 +8,7 @@ import httpx
 from app.models.check_result import CheckResult
 from app.models.enums import VPN_CHECK_TYPES, CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
+from app.services.speed_test_config import SpeedTestRunContext
 from app.services.vpn_check_service import run_vpn_health_check
 
 _XML_PREFIX_RE = re.compile(r"^\s*(<\?xml|<[!?])", re.IGNORECASE)
@@ -67,9 +68,13 @@ def _evaluate_body(component: MonitoredComponent, response: httpx.Response) -> t
     return CheckOutcome.ERROR.value, f"Unknown check type: {component.check_type}", details
 
 
-def run_health_check(component: MonitoredComponent) -> CheckResult:
+def run_health_check(
+    component: MonitoredComponent,
+    *,
+    speed_test_context: SpeedTestRunContext | None = None,
+) -> CheckResult:
     if component.check_type in VPN_CHECK_TYPES:
-        return run_vpn_health_check(component)
+        return run_vpn_health_check(component, speed_test_context=speed_test_context)
     return _run_http_health_check(component)
 
 
