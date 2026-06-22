@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
-from app.schemas.monitored_component import MonitoredComponentCreate
+from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES, MAX_SPEED_TEST_BYTES, MonitoredComponentCreate
 from app.services import vpn_check_service as vpn
 from app.services.health_check_service import run_health_check
 from app.services.vpn_check_service import public_network_summary, run_vpn_health_check
@@ -84,7 +84,7 @@ class TestVpnHelpers:
                 },
                 "speed_test": {
                     "ok": True,
-                    "url": vpn.DEFAULT_SPEED_TEST_URL,
+                    "url": vpn._speed_test_url(DEFAULT_SPEED_TEST_BYTES),
                     "bytes": 524288,
                     "duration_ms": 800,
                     "mbps": 5.24,
@@ -268,6 +268,80 @@ class TestVpnSchemas:
             }
         )
         assert payload.check_type == "xray"
+
+    def test_vpn_create_accepts_speed_test_bytes(self) -> None:
+        payload = MonitoredComponentCreate.model_validate(
+            {
+                "project_id": uuid4(),
+                "component_kind_id": uuid4(),
+                "name": "VPN",
+                "slug": "vpn",
+                "check_type": "openvpn",
+                "check_config": {"config_text": "client\ndev tun\nremote x 1194\n"},
+                "speed_test_bytes": 10_485_760,
+            }
+        )
+        assert payload.speed_test_bytes == 10_485_760
+
+    def test_http_create_rejects_speed_test_bytes(self) -> None:
+        with pytest.raises(ValidationError):
+            MonitoredComponentCreate.model_validate(
+                {
+                    "project_id": uuid4(),
+                    "component_kind_id": uuid4(),
+                    "name": "API",
+                    "slug": "api",
+                    "check_url": "https://example.com",
+                    "speed_test_bytes": 10_485_760,
+                }
+            )
+
+    def test_speed_test_bytes_for_component(self) -> None:
+        component = _vpn_component(speed_test_bytes=10_485_760)
+        assert vpn._speed_test_bytes_for(component) == 10_485_760
+        assert vpn._speed_test_bytes_for(_vpn_component(speed_test_bytes=None)) == DEFAULT_SPEED_TEST_BYTES
+
+    def test_vpn_create_rejects_speed_test_bytes_below_min(self) -> None:
+        with pytest.raises(ValidationError):
+            MonitoredComponentCreate.model_validate(
+                {
+                    "project_id": uuid4(),
+                    "component_kind_id": uuid4(),
+                    "name": "VPN",
+                    "slug": "vpn",
+                    "check_type": "openvpn",
+                    "check_config": {"config_text": "client\ndev tun\nremote x 1194\n"},
+                    "speed_test_bytes": 512,
+                }
+            )
+
+    def test_vpn_create_rejects_speed_test_bytes_above_max(self) -> None:
+        with pytest.raises(ValidationError):
+            MonitoredComponentCreate.model_validate(
+                {
+                    "project_id": uuid4(),
+                    "component_kind_id": uuid4(),
+                    "name": "VPN",
+                    "slug": "vpn",
+                    "check_type": "openvpn",
+                    "check_config": {"config_text": "client\ndev tun\nremote x 1194\n"},
+                    "speed_test_bytes": MAX_SPEED_TEST_BYTES + 1,
+                }
+            )
+
+    def test_vpn_create_rejects_non_integer_speed_test_bytes(self) -> None:
+        with pytest.raises(ValidationError):
+            MonitoredComponentCreate.model_validate(
+                {
+                    "project_id": uuid4(),
+                    "component_kind_id": uuid4(),
+                    "name": "VPN",
+                    "slug": "vpn",
+                    "check_type": "openvpn",
+                    "check_config": {"config_text": "client\ndev tun\nremote x 1194\n"},
+                    "speed_test_bytes": 10.5,
+                }
+            )
 
 
 class TestOpenVpnCheck:
