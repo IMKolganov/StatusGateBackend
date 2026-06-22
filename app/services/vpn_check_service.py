@@ -15,13 +15,21 @@ import httpx
 from app.models.check_result import CheckResult
 from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
+from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES
 from app.services.xray_config import parse_xray_config_text
 
 _vpn_check_lock = threading.Lock()
 
 DEFAULT_PROBE_URL = "https://ifconfig.me/ip"
-DEFAULT_SPEED_TEST_BYTES = 524_288
-DEFAULT_SPEED_TEST_URL = f"https://speed.cloudflare.com/__down?bytes={DEFAULT_SPEED_TEST_BYTES}"
+SPEED_TEST_URL_TEMPLATE = "https://speed.cloudflare.com/__down?bytes={bytes}"
+
+
+def _speed_test_bytes_for(component: MonitoredComponent) -> int:
+    return component.speed_test_bytes or DEFAULT_SPEED_TEST_BYTES
+
+
+def _speed_test_url(bytes_count: int) -> str:
+    return SPEED_TEST_URL_TEMPLATE.format(bytes=bytes_count)
 
 
 def run_vpn_health_check(component: MonitoredComponent) -> CheckResult:
@@ -110,12 +118,14 @@ def _run_openvpn_check(component: MonitoredComponent) -> CheckResult:
             network["probe"] = probe
 
             if probe.get("ok"):
+                speed_test_bytes = _speed_test_bytes_for(component)
                 _enrich_network_metrics(
                     network,
                     gateway=network.get("gateway"),
                     proxy_url=None,
                     iface=iface,
                     timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+                    speed_test_bytes=speed_test_bytes,
                 )
 
             outcome = CheckOutcome.UP.value if probe.get("ok") else CheckOutcome.DOWN.value
@@ -217,12 +227,14 @@ def _run_xray_check(component: MonitoredComponent) -> CheckResult:
             network["probe"] = probe
 
             if probe.get("ok"):
+                speed_test_bytes = _speed_test_bytes_for(component)
                 _enrich_network_metrics(
                     network,
                     gateway=None,
                     proxy_url=proxy_url,
                     iface=None,
                     timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+                    speed_test_bytes=speed_test_bytes,
                 )
 
             outcome = CheckOutcome.UP.value if probe.get("ok") else CheckOutcome.DOWN.value
@@ -360,6 +372,7 @@ def _enrich_network_metrics(
     proxy_url: str | None,
     iface: str | None,
     timeout: float,
+    speed_test_bytes: int = DEFAULT_SPEED_TEST_BYTES,
 ) -> None:
     if gateway:
         ping = _ping_host(gateway, count=4, timeout=min(5, timeout / 2))
@@ -368,9 +381,9 @@ def _enrich_network_metrics(
             network["gateway_ping"] = ping
 
     speed = _measure_download_speed(
-        DEFAULT_SPEED_TEST_URL,
+        _speed_test_url(speed_test_bytes),
         proxy_url=proxy_url,
-        timeout=min(10, timeout),
+        timeout=max(5, timeout),
     )
     if speed:
         network["speed_test"] = speed
