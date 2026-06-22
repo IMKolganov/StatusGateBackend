@@ -21,6 +21,7 @@ def _component() -> MonitoredComponent:
         expected_status_code=200,
         timeout_seconds=60,
         is_active=True,
+        speed_test_enabled=True,
         created_at=now,
         updated_at=now,
     )

@@ -11,6 +11,7 @@ from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES, MAX_SPEED_TEST_BYTES, MonitoredComponentCreate
 from app.schemas.network import NetworkSummary
 from app.services import vpn_check_service as vpn
+from app.services.speed_test_config import DEFAULT_SPEED_TEST_URL_TEMPLATE, build_speed_test_url
 from app.services.health_check_service import run_health_check
 from app.services.vpn_check_service import public_network_summary, run_vpn_health_check
 
@@ -85,7 +86,7 @@ class TestVpnHelpers:
                 },
                 "speed_test": {
                     "ok": True,
-                    "url": vpn._speed_test_url(DEFAULT_SPEED_TEST_BYTES),
+                    "url": build_speed_test_url(DEFAULT_SPEED_TEST_URL_TEMPLATE, DEFAULT_SPEED_TEST_BYTES),
                     "bytes": 524288,
                     "duration_ms": 800,
                     "mbps": 5.24,
@@ -120,7 +121,7 @@ class TestVpnHelpers:
                 "probe": {"url": "https://ifconfig.me/ip", "exit_ip": "203.0.113.1", "latency_ms": 85},
                 "speed_test": {
                     "ok": False,
-                    "url": vpn._speed_test_url(DEFAULT_SPEED_TEST_BYTES),
+                    "url": build_speed_test_url(DEFAULT_SPEED_TEST_URL_TEMPLATE, DEFAULT_SPEED_TEST_BYTES),
                     "bytes": 0,
                     "duration_ms": 245,
                     "error": "Connect timeout",
@@ -131,9 +132,17 @@ class TestVpnHelpers:
         assert summary is not None
         assert summary.download_mbps is None
         assert summary.speed_test_ok is False
-        assert summary.speed_test_error == "Connect timeout"
+        assert summary.speed_test_error == "Speed test timed out"
         assert summary.download_bytes == 0
         assert summary.download_duration_ms == 245
+
+    def test_format_speed_test_error_from_httpx_message(self) -> None:
+        raw = (
+            "Client error '429 Too Many Requests' for url "
+            "'https://speed.cloudflare.com/__down?bytes=10485760' "
+            "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429"
+        )
+        assert vpn._format_speed_test_error(raw) == "Speed test rate limited (HTTP 429)"
 
     def test_parse_ping_output(self) -> None:
         sample = """
@@ -368,6 +377,33 @@ class TestVpnSchemas:
                 }
             )
 
+    def test_vpn_create_validates_speed_test_url_template(self) -> None:
+        with pytest.raises(ValidationError):
+            MonitoredComponentCreate.model_validate(
+                {
+                    "project_id": uuid4(),
+                    "component_kind_id": uuid4(),
+                    "name": "VPN",
+                    "slug": "vpn",
+                    "check_type": "openvpn",
+                    "check_config": {"config_text": "client\ndev tun\nremote x 1194\n"},
+                    "speed_test_url_template": "https://example.com/no-bytes",
+                }
+            )
+
+    def test_http_create_rejects_speed_test_enabled(self) -> None:
+        with pytest.raises(ValidationError, match="speed_test_enabled"):
+            MonitoredComponentCreate.model_validate(
+                {
+                    "project_id": uuid4(),
+                    "component_kind_id": uuid4(),
+                    "name": "API",
+                    "slug": "api",
+                    "check_url": "https://example.com",
+                    "speed_test_enabled": False,
+                }
+            )
+
 
 class TestOpenVpnCheck:
     def test_openvpn_tunnel_timeout(self) -> None:
@@ -532,7 +568,7 @@ class TestHealthCheckDispatch:
         with patch("app.services.health_check_service.run_vpn_health_check") as vpn_check:
             vpn_check.return_value = MagicMock(outcome=CheckOutcome.UP.value)
             run_health_check(component)
-        vpn_check.assert_called_once_with(component)
+        vpn_check.assert_called_once_with(component, speed_test_context=None)
 
     def test_run_health_check_routes_http(self) -> None:
         component = _vpn_component(check_type=CheckType.HTTP_STATUS.value, check_config=None)

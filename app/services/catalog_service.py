@@ -117,7 +117,10 @@ class MonitoredComponentService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Component kind not found")
         if self._queries.get_by_project_and_slug(payload.project_id, payload.slug):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Component slug already exists in project")
-        return self._commands.create(MonitoredComponent(**payload.model_dump()))
+        data = payload.model_dump()
+        if data.get("speed_test_enabled") is None:
+            data["speed_test_enabled"] = True
+        return self._commands.create(MonitoredComponent(**data))
 
     def update(self, component_id: UUID, payload: MonitoredComponentUpdate) -> MonitoredComponent:
         component = self.get(component_id)
@@ -128,6 +131,12 @@ class MonitoredComponentService:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="speed_test_bytes is only supported for VPN check types",
             )
+        for field in ("speed_test_url_template", "speed_test_interval_seconds", "speed_test_enabled"):
+            if data.get(field) is not None and effective_check_type not in VPN_CHECK_TYPES:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"{field} is only supported for VPN check types",
+                )
         project_id = data.get("project_id", component.project_id)
         slug = data.get("slug", component.slug)
         if "project_id" in data and not self._project_queries.get_by_id(data["project_id"]):

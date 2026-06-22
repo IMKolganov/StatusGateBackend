@@ -5,10 +5,17 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.check_result import CheckResult
+from app.models.enums import VPN_CHECK_TYPES
 from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 from app.models.project import Project
 from app.services.health_check_service import run_health_check
+from app.services.speed_test_config import (
+    SpeedTestRunContext,
+    effective_speed_test_url_template,
+    extract_speed_test_from_details,
+    should_run_speed_test,
+)
 
 
 class MonitoringSettingsRepository:
@@ -144,7 +151,20 @@ class HealthCheckRunner:
         return [component for component in components if self.is_due(component, settings, now=current)]
 
     def run_check(self, component: MonitoredComponent) -> CheckResult:
-        result = run_health_check(component)
+        settings = self.get_settings()
+        speed_test_context: SpeedTestRunContext | None = None
+        if component.check_type in VPN_CHECK_TYPES:
+            latest_map = self._results_repo.latest_by_component_ids([component.id])
+            latest = latest_map.get(component.id)
+            previous_speed_test = extract_speed_test_from_details(
+                latest.details if latest and isinstance(latest.details, dict) else None
+            )
+            speed_test_context = SpeedTestRunContext(
+                url_template=effective_speed_test_url_template(component, settings),
+                run_speed_test=should_run_speed_test(component, settings, latest),
+                previous_speed_test=previous_speed_test,
+            )
+        result = run_health_check(component, speed_test_context=speed_test_context)
         component.last_checked_at = result.checked_at
         self._session.add(component)
         return self._results_repo.add(result)
