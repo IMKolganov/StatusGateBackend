@@ -13,6 +13,7 @@ from app.services.health_check_service import run_health_check
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
+    extract_last_successful_speed_test,
     extract_speed_test_from_details,
     should_run_speed_test,
 )
@@ -156,13 +157,14 @@ class HealthCheckRunner:
         if component.check_type in VPN_CHECK_TYPES:
             latest_map = self._results_repo.latest_by_component_ids([component.id])
             latest = latest_map.get(component.id)
-            previous_speed_test = extract_speed_test_from_details(
-                latest.details if latest and isinstance(latest.details, dict) else None
-            )
+            latest_details = latest.details if latest and isinstance(latest.details, dict) else None
+            previous_speed_test = extract_speed_test_from_details(latest_details)
+            last_successful_speed_test = extract_last_successful_speed_test(latest_details)
             speed_test_context = SpeedTestRunContext(
                 url_template=effective_speed_test_url_template(component, settings),
                 run_speed_test=should_run_speed_test(component, settings, latest),
                 previous_speed_test=previous_speed_test,
+                last_successful_speed_test=last_successful_speed_test,
             )
         result = run_health_check(component, speed_test_context=speed_test_context)
         component.last_checked_at = result.checked_at
@@ -171,7 +173,9 @@ class HealthCheckRunner:
 
     def run_due_checks(self) -> list[CheckResult]:
         results: list[CheckResult] = []
-        for component in self.list_due_components():
+        due = self.list_due_components()
+        due.sort(key=lambda component: (component.check_type not in VPN_CHECK_TYPES, str(component.id)))
+        for component in due:
             results.append(self.run_check(component))
         self._session.commit()
         return results

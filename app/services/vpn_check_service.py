@@ -20,6 +20,10 @@ from app.schemas.network import NetworkSummary
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     build_speed_test_url,
+    is_cloudflare_speed_test_template,
+    is_rate_limited_speed_test,
+    pick_display_speed_test,
+    try_acquire_cloudflare_speed_test_slot,
 )
 from app.services.xray_config import parse_xray_config_text
 
@@ -389,19 +393,25 @@ def _enrich_network_metrics(
             network["gateway_ping"] = ping
 
     if not speed_test_context.run_speed_test:
-        if speed_test_context.previous_speed_test:
-            cached = dict(speed_test_context.previous_speed_test)
-            cached["cached"] = True
-            network["speed_test"] = cached
+        _apply_cached_speed_test(network, speed_test_context)
+        return
+
+    url = build_speed_test_url(speed_test_context.url_template, speed_test_bytes)
+    if is_cloudflare_speed_test_template(speed_test_context.url_template) and not try_acquire_cloudflare_speed_test_slot():
+        _apply_cached_speed_test(network, speed_test_context, throttled=True)
         return
 
     speed = _measure_download_speed(
-        build_speed_test_url(speed_test_context.url_template, speed_test_bytes),
+        url,
         proxy_url=proxy_url,
         timeout=max(5, timeout),
     )
     if speed:
         network["speed_test"] = speed
+        if speed.get("ok"):
+            network["speed_test_last_success"] = speed
+        elif speed_test_context.last_successful_speed_test:
+            network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
 
     if iface and not network.get("mtu"):
         try:
@@ -411,6 +421,34 @@ def _enrich_network_metrics(
                 network["mtu"] = link_rows[0].get("mtu")
         except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
             pass
+
+
+def _apply_cached_speed_test(
+    network: dict[str, Any],
+    speed_test_context: SpeedTestRunContext,
+    *,
+    throttled: bool = False,
+) -> None:
+    displayed = pick_display_speed_test(
+        speed_test_context.previous_speed_test,
+        speed_test_context.last_successful_speed_test,
+    )
+    if displayed:
+        cached = dict(displayed)
+        cached["cached"] = True
+        if throttled:
+            cached["throttled"] = True
+        network["speed_test"] = cached
+        if speed_test_context.last_successful_speed_test:
+            network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+        return
+
+    if throttled:
+        network["speed_test"] = {
+            "ok": False,
+            "error": "Speed test deferred (Cloudflare throttle — retry on next interval)",
+            "deferred": True,
+        }
 
 
 def _ping_host(host: str, *, count: int = 4, timeout: float = 5) -> dict[str, Any] | None:
@@ -677,8 +715,13 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
     probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
     gateway_ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
     speed_test = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
+    last_success = network.get("speed_test_last_success") if isinstance(network.get("speed_test_last_success"), dict) else {}
     speed_test_ok: bool | None = None
     speed_test_error: str | None = None
+    download_mbps = speed_test.get("mbps")
+    download_bytes = speed_test.get("bytes")
+    download_duration_ms = speed_test.get("duration_ms")
+
     if speed_test:
         if speed_test.get("ok") is True:
             speed_test_ok = True
@@ -686,6 +729,19 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
             speed_test_ok = False
             raw_error = speed_test.get("error")
             speed_test_error = _format_speed_test_error(raw_error) if raw_error else "Speed test failed"
+            if is_rate_limited_speed_test(speed_test) and last_success.get("mbps") is not None:
+                download_mbps = last_success.get("mbps")
+                download_bytes = last_success.get("bytes")
+                download_duration_ms = last_success.get("duration_ms")
+                speed_test_ok = True
+                speed_test_error = (
+                    f"{speed_test_error} (showing last successful measurement)"
+                )
+        elif speed_test.get("stale") and speed_test.get("mbps") is not None:
+            speed_test_ok = True
+            download_mbps = speed_test.get("mbps")
+            download_bytes = speed_test.get("bytes")
+            download_duration_ms = speed_test.get("duration_ms")
 
     summary = NetworkSummary(
         interface=network.get("interface"),
@@ -702,9 +758,9 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
         gateway_ping_avg_ms=gateway_ping.get("avg_ms"),
         gateway_ping_loss_percent=gateway_ping.get("loss_percent"),
         gateway_ping_jitter_ms=gateway_ping.get("jitter_ms"),
-        download_mbps=speed_test.get("mbps"),
-        download_bytes=speed_test.get("bytes"),
-        download_duration_ms=speed_test.get("duration_ms"),
+        download_mbps=download_mbps,
+        download_bytes=download_bytes,
+        download_duration_ms=download_duration_ms,
         speed_test_ok=speed_test_ok,
         speed_test_error=speed_test_error,
     )
