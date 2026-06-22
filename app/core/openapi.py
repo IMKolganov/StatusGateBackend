@@ -67,6 +67,9 @@ def _customize_openapi_schema(schema: dict[str, Any]) -> dict[str, Any]:
     }
     manual_overrides: dict[tuple[str, str, str], dict[str, str]] = {
         ("/api/auth/login", "post", "200"): _wrap_data_schema(components, "LoginResult", login_data_schema),
+        ("/api/auth/google-login", "post", "200"): _wrap_data_schema(
+            components, "LoginResult", login_data_schema
+        ),
         ("/api/auth/login/2fa", "post", "200"): _wrap_data_schema(
             components, "AccountResponse", {"$ref": "#/components/schemas/AccountResponse"}
         ),

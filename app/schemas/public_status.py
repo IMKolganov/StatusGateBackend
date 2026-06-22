@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from uuid import UUID
 
+from app.schemas.network import NetworkSummary
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -24,10 +25,7 @@ class PublicServiceStatus(BaseModel):
     status: str = Field(description="Latest check outcome or 'unknown'")
     latency_ms: int | None = None
     checked_at: datetime | None = None
-    network_summary: dict | None = Field(
-        default=None,
-        description="Latest VPN/network probe details (interface, IP, exit IP, etc.)",
-    )
+    network_summary: NetworkSummary | None = None
 
 
 class PublicProjectStatus(BaseModel):
@@ -53,6 +51,7 @@ class PublicDayBar(BaseModel):
     failed_count: int = 0
     degraded_count: int = 0
     availability_percent: float | None = None
+    downtime_seconds: int = 0
     incidents: list[PublicDayIncident] = []
 
 

@@ -10,12 +10,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from typing import Any
+
 import httpx
 
 from app.models.check_result import CheckResult
 from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES
+from app.schemas.network import NetworkSummary
 from app.services.xray_config import parse_xray_config_text
 
 _vpn_check_lock = threading.Lock()
@@ -620,7 +623,7 @@ def _error_result(
     )
 
 
-def public_network_summary(details: dict[str, Any] | None) -> dict[str, Any] | None:
+def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | None:
     if not details:
         return None
     network = details.get("network")
@@ -630,23 +633,37 @@ def public_network_summary(details: dict[str, Any] | None) -> dict[str, Any] | N
     probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
     gateway_ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
     speed_test = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
-    summary = {
-        "interface": network.get("interface"),
-        "ipv4_address": network.get("ipv4_address"),
-        "gateway": network.get("gateway"),
-        "dns_servers": network.get("dns_servers"),
-        "mtu": network.get("mtu"),
-        "connect_time_ms": network.get("connect_time_ms"),
-        "proxy_url": network.get("proxy_url"),
-        "inbound_protocol": network.get("inbound_protocol"),
-        "probe_url": probe.get("url"),
-        "exit_ip": probe.get("exit_ip"),
-        "probe_latency_ms": probe.get("latency_ms"),
-        "gateway_ping_avg_ms": gateway_ping.get("avg_ms"),
-        "gateway_ping_loss_percent": gateway_ping.get("loss_percent"),
-        "gateway_ping_jitter_ms": gateway_ping.get("jitter_ms"),
-        "download_mbps": speed_test.get("mbps"),
-        "download_bytes": speed_test.get("bytes"),
-        "download_duration_ms": speed_test.get("duration_ms"),
-    }
-    return {key: value for key, value in summary.items() if value not in (None, [], "")}
+    speed_test_ok: bool | None = None
+    speed_test_error: str | None = None
+    if speed_test:
+        if speed_test.get("ok") is True:
+            speed_test_ok = True
+        elif speed_test.get("ok") is False:
+            speed_test_ok = False
+            raw_error = speed_test.get("error")
+            speed_test_error = raw_error if isinstance(raw_error, str) and raw_error.strip() else "Unknown error"
+
+    summary = NetworkSummary(
+        interface=network.get("interface"),
+        ipv4_address=network.get("ipv4_address"),
+        gateway=network.get("gateway"),
+        dns_servers=network.get("dns_servers"),
+        mtu=network.get("mtu"),
+        connect_time_ms=network.get("connect_time_ms"),
+        proxy_url=network.get("proxy_url"),
+        inbound_protocol=network.get("inbound_protocol"),
+        probe_url=probe.get("url"),
+        exit_ip=probe.get("exit_ip"),
+        probe_latency_ms=probe.get("latency_ms"),
+        gateway_ping_avg_ms=gateway_ping.get("avg_ms"),
+        gateway_ping_loss_percent=gateway_ping.get("loss_percent"),
+        gateway_ping_jitter_ms=gateway_ping.get("jitter_ms"),
+        download_mbps=speed_test.get("mbps"),
+        download_bytes=speed_test.get("bytes"),
+        download_duration_ms=speed_test.get("duration_ms"),
+        speed_test_ok=speed_test_ok,
+        speed_test_error=speed_test_error,
+    )
+    if summary.model_dump(exclude_none=True):
+        return summary
+    return None
