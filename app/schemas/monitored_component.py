@@ -4,14 +4,11 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import VPN_CHECK_TYPES
+from app.schemas.network import NetworkSummary, VpnCheckConfig
 
 DEFAULT_SPEED_TEST_BYTES = 524_288
 MIN_SPEED_TEST_BYTES = 1_024
 MAX_SPEED_TEST_BYTES = 52_428_800
-
-
-class VpnCheckConfig(BaseModel):
-    config_text: str = Field(min_length=10, max_length=200_000)
 
 
 CHECK_TYPE_PATTERN = r"^(http_status|json|xml|openvpn|xray)$"
@@ -27,7 +24,7 @@ class MonitoredComponentCreate(BaseModel):
     check_url: str = Field(default="", max_length=2048)
     check_method: str = Field(default="GET", max_length=10)
     check_type: str = Field(default="http_status", pattern=CHECK_TYPE_PATTERN)
-    check_config: dict | None = None
+    check_config: VpnCheckConfig | None = None
     speed_test_bytes: int | None = Field(default=None, ge=MIN_SPEED_TEST_BYTES, le=MAX_SPEED_TEST_BYTES)
     expected_status_code: int = Field(default=200, ge=100, le=599)
     timeout_seconds: int = Field(default=10, ge=1, le=300)
@@ -65,7 +62,7 @@ class MonitoredComponentUpdate(BaseModel):
     check_url: str | None = Field(default=None, max_length=2048)
     check_method: str | None = Field(default=None, max_length=10)
     check_type: str | None = Field(default=None, pattern=CHECK_TYPE_PATTERN)
-    check_config: dict | None = None
+    check_config: VpnCheckConfig | None = None
     speed_test_bytes: int | None = Field(default=None, ge=MIN_SPEED_TEST_BYTES, le=MAX_SPEED_TEST_BYTES)
     expected_status_code: int | None = Field(default=None, ge=100, le=599)
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
@@ -93,7 +90,7 @@ class MonitoredComponentResponse(BaseModel):
     check_url: str
     check_method: str
     check_type: str
-    check_config: dict | None
+    check_config: VpnCheckConfig | None
     speed_test_bytes: int | None
     expected_status_code: int
     timeout_seconds: int
@@ -105,6 +102,6 @@ class MonitoredComponentResponse(BaseModel):
     latest_checked_at: datetime | None = None
     latest_error_message: str | None = None
     latest_log_tail: str | None = None
-    latest_network_summary: dict | None = None
+    latest_network_summary: NetworkSummary | None = None
     created_at: datetime
     updated_at: datetime
