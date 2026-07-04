@@ -2,6 +2,7 @@ import json
 import re
 import time
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
@@ -23,11 +24,11 @@ def _is_xml_body(body: str, content_type: str | None) -> bool:
     return bool(_XML_PREFIX_RE.match(body) or _XML_TAG_RE.search(body[:500]))
 
 
-def _evaluate_body(component: MonitoredComponent, response: httpx.Response) -> tuple[str, str | None, dict | None]:
+def _evaluate_body(component: MonitoredComponent, response: httpx.Response) -> tuple[str, str | None, dict[str, Any] | None]:
     status_ok = response.status_code == component.expected_status_code
     content_type = response.headers.get("content-type", "")
     body_text = response.text
-    details: dict = {
+    details: dict[str, Any] = {
         "check_type": component.check_type,
         "content_type": content_type or None,
         "body_preview": body_text[:500] if body_text else None,

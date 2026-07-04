@@ -1,7 +1,8 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from app.services.speed_test_config import validate_speed_test_url_template
 
@@ -16,7 +17,7 @@ class CheckResultResponse(BaseModel):
     latency_ms: int | None
     http_status_code: int | None
     error_message: str | None
-    details: dict | None
+    details: dict[str, Any] | None
 
 
 class MonitoringSettingsResponse(BaseModel):
@@ -52,3 +53,22 @@ class SpeedTestAdvisoryResponse(BaseModel):
 class PurgeCheckHistoryResponse(BaseModel):
     deleted_count: int
     remaining_count: int
+
+
+class ConnectionEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    monitored_component_id: UUID
+    occurred_at: datetime
+    event_type: str
+    outcome: str | None
+    message: str | None
+    details: dict[str, Any] | None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def event_label(self) -> str:
+        from app.services.connection_event_service import connection_event_label
+
+        return connection_event_label(self.event_type)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import enum
 
 
@@ -20,6 +22,18 @@ class CheckType(str, enum.Enum):
 class ConnectionMode(str, enum.Enum):
     EPHEMERAL = "ephemeral"
     PERSISTENT = "persistent"
+
+
+class ConnectionEventType(str, enum.Enum):
+    TUNNEL_UP = "tunnel_up"
+    TUNNEL_DOWN = "tunnel_down"
+    RECONNECT = "reconnect"
+    CONNECT_FAILED = "connect_failed"
+    UNAVAILABLE = "unavailable"
+    AVAILABLE = "available"
+
+
+CONNECTION_EVENT_TYPES = frozenset({item.value for item in ConnectionEventType})
 
 
 VPN_CHECK_TYPES = frozenset({CheckType.OPENVPN.value, CheckType.XRAY.value})

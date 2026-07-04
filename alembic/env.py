@@ -5,6 +5,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.config import settings
 from app.models import Base
+from app.models import connection_event as _connection_event  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
 config = context.config
 

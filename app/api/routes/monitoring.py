@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_access_roles
@@ -8,16 +8,17 @@ from app.api.pagination import to_paginated_response
 from app.cqrs.common import PaginationParams
 from app.schemas.monitoring import (
     CheckResultResponse,
+    ConnectionEventResponse,
     MonitoringSettingsResponse,
     MonitoringSettingsUpdate,
     PurgeCheckHistoryResponse,
     SpeedTestAdvisoryResponse,
 )
-from app.schemas.monitored_component import MonitoredComponentResponse
 from app.schemas.pagination import paginated_of
 from app.services.monitoring_admin_service import MonitoringAdminService
 
 PaginatedCheckResultResponse = paginated_of(CheckResultResponse)
+PaginatedConnectionEventResponse = paginated_of(ConnectionEventResponse)
 
 router = APIRouter(prefix="/api/admin/monitoring", tags=["admin-monitoring"])
 
@@ -58,7 +59,7 @@ def run_manual_check(
     _=Depends(require_access_roles("admin", "operator")),
     service: MonitoringAdminService = Depends(get_monitoring_admin_service),
 ) -> CheckResultResponse:
-    return service.run_manual_check(component_id)
+    return CheckResultResponse.model_validate(service.run_manual_check(component_id))
 
 
 @router.get("/monitored-components/{component_id}/check-results", response_model=PaginatedCheckResultResponse)
@@ -71,6 +72,21 @@ def list_check_results(
 ):
     result = service.list_check_results(component_id, PaginationParams(offset=offset, limit=limit))
     return to_paginated_response(result, CheckResultResponse.model_validate)
+
+
+@router.get(
+    "/monitored-components/{component_id}/connection-events",
+    response_model=PaginatedConnectionEventResponse,
+)
+def list_connection_events(
+    component_id: UUID,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    _=Depends(require_access_roles("admin", "operator", "viewer")),
+    service: MonitoringAdminService = Depends(get_monitoring_admin_service),
+):
+    result = service.list_connection_events(component_id, PaginationParams(offset=offset, limit=limit))
+    return to_paginated_response(result, ConnectionEventResponse.model_validate)
 
 
 @router.delete(

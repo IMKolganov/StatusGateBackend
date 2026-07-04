@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,11 +15,19 @@ from app.models.enums import CheckOutcome, CheckType, ConnectionMode
 from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 from app.schemas.monitored_component import MonitoredComponentCreate, MonitoredComponentUpdate
+from app.schemas.network import VpnCheckConfig
 from app.services import vpn_check_service as vpn
 from app.services.monitoring_service import HealthCheckRunner
 from app.services.speed_test_config import SpeedTestRunContext
 from app.services.vpn_netns import ensure_netns, list_netns_names, netns_name_for_component
-from app.services.vpn_session_supervisor import VpnSessionSupervisor, _component_fingerprint
+from app.services.vpn_session_supervisor import (
+    VpnSessionSupervisor,
+    _PersistentComponentSnapshot,
+    _component_fingerprint,
+)
+
+_VPN_CONFIG = VpnCheckConfig(config_text="client\ndev tun\nproto udp\nremote vpn.example.com 1194\n")
+_XRAY_CONFIG = VpnCheckConfig(config_text='{"inbounds":[{"protocol":"socks","port":1080}]}')
 
 
 def _vpn_component(**overrides) -> MonitoredComponent:
@@ -55,7 +64,7 @@ def _settings(**overrides) -> MonitoringSettings:
 
 
 @pytest.fixture(autouse=True)
-def reset_supervisor() -> None:
+def reset_supervisor() -> Generator[None, None, None]:
     VpnSessionSupervisor._instance = None
     yield
     if VpnSessionSupervisor._instance is not None:
@@ -71,7 +80,7 @@ class TestConnectionModeSchema:
             name="VPN",
             slug="vpn",
             check_type="openvpn",
-            check_config={"config_text": "client\ndev tun\nremote vpn.example.com 1194\n"},
+            check_config=_VPN_CONFIG,
         )
         assert payload.connection_mode == ConnectionMode.EPHEMERAL.value
 
@@ -82,7 +91,7 @@ class TestConnectionModeSchema:
             name="VPN",
             slug="vpn",
             check_type="openvpn",
-            check_config={"config_text": "client\ndev tun\nremote vpn.example.com 1194\n"},
+            check_config=_VPN_CONFIG,
             connection_mode=ConnectionMode.PERSISTENT.value,
         )
         assert payload.connection_mode == ConnectionMode.PERSISTENT.value
@@ -95,7 +104,7 @@ class TestConnectionModeSchema:
                 name="Xray",
                 slug="xray",
                 check_type="xray",
-                check_config={"config_text": '{"inbounds":[{"protocol":"socks","port":1080}]}'},
+                check_config=_XRAY_CONFIG,
                 connection_mode=ConnectionMode.PERSISTENT.value,
             )
 
@@ -275,7 +284,7 @@ class TestVpnSessionSupervisor:
         worker = MagicMock()
         supervisor._workers[component_id] = worker
         supervisor._stop_events[component_id] = stop_event
-        supervisor._snapshots[component_id] = SimpleNamespace(
+        supervisor._snapshots[component_id] = _PersistentComponentSnapshot(
             component_id=component_id,
             config_fingerprint="abc",
             poll_interval_seconds=60,
@@ -296,7 +305,7 @@ class TestVpnSessionSupervisor:
         old_worker = MagicMock()
         supervisor._workers[component_id] = old_worker
         supervisor._stop_events[component_id] = old_stop
-        supervisor._snapshots[component_id] = SimpleNamespace(
+        supervisor._snapshots[component_id] = _PersistentComponentSnapshot(
             component_id=component_id,
             config_fingerprint="old",
             poll_interval_seconds=60,
@@ -305,7 +314,7 @@ class TestVpnSessionSupervisor:
 
         with patch.object(VpnSessionSupervisor, "_load_desired_components", return_value=[component_id]):
             with patch.object(VpnSessionSupervisor, "_snapshot_for") as snapshot_for:
-                snapshot_for.return_value = SimpleNamespace(
+                snapshot_for.return_value = _PersistentComponentSnapshot(
                     component_id=component_id,
                     config_fingerprint="new",
                     poll_interval_seconds=60,

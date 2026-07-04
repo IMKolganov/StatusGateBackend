@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,7 +31,7 @@ class Settings(BaseSettings):
     require_https: bool = False
 
     cookie_secure: bool = False
-    cookie_samesite: str = "lax"
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     access_cookie_name: str = "sg_access_token"
     refresh_cookie_name: str = "sg_refresh_token"
 
@@ -62,4 +64,4 @@ class Settings(BaseSettings):
         return bool(self.google_client_id.strip() and self.google_client_secret.strip())
 
 
-settings = Settings()
+settings = Settings()  # pyright: ignore[reportCallIssue]

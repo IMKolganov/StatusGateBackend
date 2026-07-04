@@ -19,7 +19,6 @@ from app.schemas.monitored_component import (
 )
 from app.schemas.pagination import paginated_of
 from app.schemas.project import ProjectCreate, ProjectResponse, ProjectUpdate
-from app.schemas.monitored_component import MonitoredComponentResponse
 from app.services.catalog_service import ComponentKindService, MonitoredComponentService, ProjectService
 from app.services.monitoring_admin_service import MonitoringAdminService
 

@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import psycopg
+from psycopg import sql
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -73,7 +74,7 @@ def _ensure_test_database() -> None:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (test_db_name,))
                 if cur.fetchone() is None:
-                    cur.execute(f'CREATE DATABASE "{test_db_name}"')
+                    cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(test_db_name)))
     except psycopg.Error as exc:
         pytest.skip(f"PostgreSQL is not available for integration tests: {exc}")
 

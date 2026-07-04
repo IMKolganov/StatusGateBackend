@@ -1,4 +1,10 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from app.models.account import Account
 
 from sqlalchemy import String, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
