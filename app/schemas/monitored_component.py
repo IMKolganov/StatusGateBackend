@@ -135,7 +135,7 @@ class MonitoredComponentResponse(BaseModel):
     expected_status_code: int
     timeout_seconds: int
     poll_interval_seconds: int | None
-    connection_mode: str
+    connection_mode: str = ConnectionMode.EPHEMERAL.value
     last_checked_at: datetime | None
     is_active: bool
     latest_outcome: str | None = None

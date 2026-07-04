@@ -20,6 +20,7 @@ def _component() -> MonitoredComponent:
         check_type="openvpn",
         expected_status_code=200,
         timeout_seconds=60,
+        connection_mode="ephemeral",
         is_active=True,
         speed_test_enabled=True,
         created_at=now,

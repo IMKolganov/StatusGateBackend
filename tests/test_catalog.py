@@ -208,6 +208,52 @@ class TestComponentKindsApi:
         assert body["check_url"] == "https://ifconfig.me/ip"
         assert body["check_config"]["config_text"].startswith("client")
 
+    def test_openvpn_component_created_with_persistent_mode(self, client: TestClient, admin_headers: dict) -> None:
+        project = _create_project(client, slug="vpn-persistent")
+        kinds = client.get("/api/admin/component-kinds")
+        openvpn_kind = next(item for item in _data(kinds)["items"] if item["slug"] == "openvpn")
+
+        response = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": openvpn_kind["id"],
+                "name": "Persistent VPN",
+                "slug": "persistent-vpn",
+                "check_type": "openvpn",
+                "check_config": {"config_text": "client\ndev tun\nproto udp\nremote vpn.example.com 1194\n"},
+                "connection_mode": "persistent",
+                "check_url": "https://www.google.com/generate_204",
+                "timeout_seconds": 30,
+            },
+        )
+        assert response.status_code == 201, response.text
+        body = _data(response)
+        assert body["connection_mode"] == "persistent"
+        assert body["check_url"] == "https://www.google.com/generate_204"
+
+    def test_xray_component_persistent_mode_rejected(self, client: TestClient, admin_headers: dict) -> None:
+        project = _create_project(client, slug="xray-persistent")
+        kinds = client.get("/api/admin/component-kinds")
+        xray_kind = next(item for item in _data(kinds)["items"] if item["slug"] == "xray")
+
+        response = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": xray_kind["id"],
+                "name": "Persistent Xray",
+                "slug": "persistent-xray",
+                "check_type": "xray",
+                "check_config": {
+                    "config_text": '{"inbounds":[{"protocol":"socks","port":1080,"listen":"127.0.0.1"}]}',
+                },
+                "connection_mode": "persistent",
+                "timeout_seconds": 30,
+            },
+        )
+        assert response.status_code == 422
+
     def test_xray_component_created_with_config(self, client: TestClient, admin_headers: dict) -> None:
         project = _create_project(client, slug="xray-create")
         kinds = client.get("/api/admin/component-kinds")
