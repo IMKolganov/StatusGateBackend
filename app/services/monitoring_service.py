@@ -5,7 +5,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.check_result import CheckResult
-from app.models.enums import VPN_CHECK_TYPES
+from app.models.enums import VPN_CHECK_TYPES, ConnectionMode, PERSISTENT_VPN_CHECK_TYPES
 from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 from app.models.project import Project
@@ -131,6 +131,11 @@ class HealthCheckRunner:
     def is_due(self, component: MonitoredComponent, settings: MonitoringSettings, *, now: datetime | None = None) -> bool:
         current = now or datetime.now(UTC)
         if not component.is_active:
+            return False
+        if (
+            component.check_type in PERSISTENT_VPN_CHECK_TYPES
+            and component.connection_mode == ConnectionMode.PERSISTENT.value
+        ):
             return False
         interval = self.effective_poll_interval(component, settings)
         if component.last_checked_at is None:
