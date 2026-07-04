@@ -11,8 +11,11 @@ from app.services.speed_test_config import (
     DEFAULT_SPEED_TEST_URL_TEMPLATE,
     SpeedTestRunContext,
     build_speed_test_url,
+    is_rate_limited_speed_test,
+    reset_cloudflare_speed_test_slot_for_tests,
     should_run_speed_test,
     speed_test_rate_warning,
+    try_acquire_cloudflare_speed_test_slot,
     validate_speed_test_url_template,
 )
 
@@ -70,8 +73,8 @@ class TestSpeedTestConfig:
         assert should_run_speed_test(component, settings, latest) is False
 
     def test_speed_test_rate_warning_for_many_services(self) -> None:
-        settings = _settings(default_poll_interval_seconds=60, default_speed_test_interval_seconds=0)
-        components = [_vpn_component(slug=f"vpn-{index}") for index in range(12)]
+        settings = _settings(default_poll_interval_seconds=60, default_speed_test_interval_seconds=60)
+        components = [_vpn_component(slug=f"vpn-{index}", speed_test_interval_seconds=60) for index in range(12)]
         warning = speed_test_rate_warning(components, settings)
         assert warning is not None
         assert "speed.cloudflare.com" in warning
@@ -81,3 +84,28 @@ class TestSpeedTestConfig:
         context = SpeedTestRunContext.default()
         assert context.run_speed_test is True
         assert "{bytes}" in context.url_template
+
+    def test_should_not_retry_immediately_after_rate_limit(self) -> None:
+        component = _vpn_component(speed_test_interval_seconds=0)
+        settings = _settings(default_speed_test_interval_seconds=0)
+        latest = CheckResult(
+            monitored_component_id=component.id,
+            checked_at=datetime.now(UTC) - timedelta(minutes=10),
+            outcome="up",
+            details={
+                "network": {
+                    "speed_test": {"ok": False, "error": "Speed test rate limited (HTTP 429)"},
+                }
+            },
+        )
+        assert should_run_speed_test(component, settings, latest) is False
+
+    def test_cloudflare_speed_test_slot_limits_burst(self) -> None:
+        reset_cloudflare_speed_test_slot_for_tests()
+        assert try_acquire_cloudflare_speed_test_slot(now=100.0) is True
+        assert try_acquire_cloudflare_speed_test_slot(now=120.0) is False
+        assert try_acquire_cloudflare_speed_test_slot(now=161.0) is True
+
+    def test_is_rate_limited_speed_test(self) -> None:
+        assert is_rate_limited_speed_test({"ok": False, "error": "Speed test rate limited (HTTP 429)"}) is True
+        assert is_rate_limited_speed_test({"ok": True, "mbps": 10.0}) is False

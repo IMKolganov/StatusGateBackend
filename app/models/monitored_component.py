@@ -6,7 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
-from app.models.enums import CheckType
+from app.models.enums import CheckType, ConnectionMode
 
 
 class MonitoredComponent(BaseModel[UUID]):
@@ -48,6 +48,12 @@ class MonitoredComponent(BaseModel[UUID]):
     speed_test_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     speed_test_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     poll_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    connection_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=ConnectionMode.EPHEMERAL.value,
+        server_default=ConnectionMode.EPHEMERAL.value,
+    )
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 

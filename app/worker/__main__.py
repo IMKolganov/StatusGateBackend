@@ -3,11 +3,13 @@ import time
 
 from app.database import SessionLocal
 from app.services.monitoring_service import HealthCheckRunner, MonitoringSettingsRepository
+from app.services.vpn_session_supervisor import VpnSessionSupervisor
 
 logger = logging.getLogger(__name__)
 
 
 def run_scheduler_cycle() -> int:
+    VpnSessionSupervisor.instance().sync()
     with SessionLocal() as session:
         runner = HealthCheckRunner(session)
         settings = MonitoringSettingsRepository(session).get()
@@ -21,13 +23,16 @@ def run_scheduler_cycle() -> int:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logger.info("StatusGate monitoring worker started")
-    while True:
-        try:
-            sleep_seconds = run_scheduler_cycle()
-        except Exception:
-            logger.exception("Scheduler cycle failed")
-            sleep_seconds = 30
-        time.sleep(sleep_seconds)
+    try:
+        while True:
+            try:
+                sleep_seconds = run_scheduler_cycle()
+            except Exception:
+                logger.exception("Scheduler cycle failed")
+                sleep_seconds = 30
+            time.sleep(sleep_seconds)
+    finally:
+        VpnSessionSupervisor.instance().stop_all()
 
 
 if __name__ == "__main__":

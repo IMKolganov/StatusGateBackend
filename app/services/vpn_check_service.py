@@ -6,26 +6,48 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 
 from app.models.check_result import CheckResult
-from app.models.enums import CheckOutcome, CheckType
+from app.models.enums import CheckOutcome, CheckType, ConnectionMode
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES
 from app.schemas.network import NetworkSummary
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     build_speed_test_url,
+    is_cloudflare_speed_test_template,
+    is_rate_limited_speed_test,
+    pick_display_speed_test,
+    try_acquire_cloudflare_speed_test_slot,
 )
+from app.services.vpn_netns import delete_netns, ensure_netns, netns_name_for_component, netns_popen, run_ip_command
 from app.services.xray_config import parse_xray_config_text
 
 _vpn_check_lock = threading.Lock()
 
 DEFAULT_PROBE_URL = "https://ifconfig.me/ip"
+PERSISTENT_TUN_DEVICE = "tun0"
+RECONNECT_DELAY_SECONDS = 5
+
+
+@dataclass
+class OpenVpnSessionHandle:
+    component_id: UUID
+    netns: str
+    proc: subprocess.Popen[Any]
+    iface: str
+    tmpdir: str
+    config_path: Path
+    log_path: Path
+    pid_path: Path
+    connect_time_ms: int
 
 
 def _speed_test_bytes_for(component: MonitoredComponent) -> int:
@@ -164,6 +186,158 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
             _terminate_process(proc, pid_path)
 
 
+def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSessionHandle | None:
+    config_text = _config_text(component)
+    netns = netns_name_for_component(component.id)
+    ensure_netns(netns)
+
+    tmpdir = tempfile.mkdtemp(prefix="sg-openvpn-persist-")
+    config_path = Path(tmpdir) / "client.ovpn"
+    log_path = Path(tmpdir) / "openvpn.log"
+    pid_path = Path(tmpdir) / "openvpn.pid"
+    config_path.write_text(config_text, encoding="utf-8")
+
+    connect_started = time.perf_counter()
+    proc = netns_popen(
+        netns,
+        [
+            "openvpn",
+            "--config",
+            str(config_path),
+            "--dev",
+            PERSISTENT_TUN_DEVICE,
+            "--log",
+            str(log_path),
+            "--writepid",
+            str(pid_path),
+            "--verb",
+            "3",
+            "--auth-nocache",
+            "--inactive",
+            "3600",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    timeout = component.timeout_seconds
+    iface = _wait_for_tun_interface(timeout=min(timeout, 120), netns=netns, device=PERSISTENT_TUN_DEVICE)
+    connect_time_ms = int((time.perf_counter() - connect_started) * 1000)
+    if iface is None:
+        _terminate_process(proc, pid_path)
+        _cleanup_persistent_tmpdir(tmpdir)
+        return None
+
+    return OpenVpnSessionHandle(
+        component_id=component.id,
+        netns=netns,
+        proc=proc,
+        iface=iface,
+        tmpdir=tmpdir,
+        config_path=config_path,
+        log_path=log_path,
+        pid_path=pid_path,
+        connect_time_ms=connect_time_ms,
+    )
+
+
+def stop_openvpn_persistent_session(handle: OpenVpnSessionHandle) -> None:
+    _terminate_process(handle.proc, handle.pid_path)
+    _cleanup_persistent_tmpdir(handle.tmpdir)
+    delete_netns(handle.netns)
+
+
+def is_openvpn_persistent_session_up(handle: OpenVpnSessionHandle) -> bool:
+    if handle.proc.poll() is not None:
+        return False
+    return _interface_is_up(handle.iface, netns=handle.netns)
+
+
+def run_openvpn_persistent_probe(
+    component: MonitoredComponent,
+    handle: OpenVpnSessionHandle,
+    *,
+    speed_test_context: SpeedTestRunContext,
+    session_event: str = "probe",
+) -> CheckResult:
+    started = time.perf_counter()
+    checked_at = datetime.now(UTC)
+    probe_url = component.check_url or DEFAULT_PROBE_URL
+    timeout = component.timeout_seconds
+
+    if not is_openvpn_persistent_session_up(handle):
+        log_tail = _read_tail(handle.log_path)
+        return CheckResult(
+            monitored_component_id=component.id,
+            checked_at=checked_at,
+            outcome=CheckOutcome.DOWN.value,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            http_status_code=None,
+            error_message="OpenVPN tunnel is down",
+            details={
+                "check_type": component.check_type,
+                "connection_mode": ConnectionMode.PERSISTENT.value,
+                "session_event": session_event,
+                "network": {"connect_time_ms": handle.connect_time_ms},
+                "log_tail": log_tail,
+            },
+        )
+
+    network = _collect_network_details(handle.iface, netns=handle.netns)
+    network["connect_time_ms"] = handle.connect_time_ms
+    network["interface"] = handle.iface
+
+    probe = _probe_endpoint(probe_url, timeout=min(15, timeout), netns=handle.netns)
+    network["probe"] = probe
+
+    if probe.get("ok"):
+        speed_test_bytes = _speed_test_bytes_for(component)
+        _enrich_network_metrics(
+            network,
+            gateway=network.get("gateway"),
+            proxy_url=None,
+            iface=handle.iface,
+            timeout=min(12, max(5, timeout - handle.connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+            speed_test_bytes=speed_test_bytes,
+            speed_test_context=speed_test_context,
+            netns=handle.netns,
+        )
+
+    if probe.get("ok"):
+        outcome = CheckOutcome.UP.value
+        error_message = None
+    else:
+        outcome = CheckOutcome.DEGRADED.value
+        error_message = probe.get("error") or "Probe through VPN failed while tunnel is up"
+
+    log_tail = _read_tail(handle.log_path)
+    details: dict[str, Any] = {
+        "check_type": component.check_type,
+        "connection_mode": ConnectionMode.PERSISTENT.value,
+        "session_event": session_event,
+        "network": network,
+    }
+    if log_tail:
+        details["log_tail"] = log_tail
+
+    return CheckResult(
+        monitored_component_id=component.id,
+        checked_at=checked_at,
+        outcome=outcome,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        http_status_code=probe.get("status_code"),
+        error_message=error_message,
+        details=details,
+    )
+
+
+def _cleanup_persistent_tmpdir(tmpdir: str) -> None:
+    import shutil
+
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedTestRunContext) -> CheckResult:
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
@@ -274,19 +448,24 @@ def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedT
             _terminate_process(proc)
 
 
-def _wait_for_tun_interface(timeout: float) -> str | None:
+def _wait_for_tun_interface(timeout: float, *, netns: str | None = None, device: str | None = None) -> str | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for iface in _list_tun_interfaces():
-            if _interface_is_up(iface):
+        for iface in _list_tun_interfaces(netns=netns):
+            if device and iface != device:
+                continue
+            if _interface_is_up(iface, netns=netns):
                 return iface
         time.sleep(0.5)
     return None
 
 
-def _list_tun_interfaces() -> list[str]:
+def _list_tun_interfaces(*, netns: str | None = None) -> list[str]:
     try:
-        output = subprocess.check_output(["ip", "-json", "link"], text=True, timeout=5)
+        if netns:
+            output = run_ip_command(["-json", "link"], netns=netns)
+        else:
+            output = subprocess.check_output(["ip", "-json", "link"], text=True, timeout=5)
         links = json.loads(output)
     except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
         return []
@@ -299,9 +478,12 @@ def _list_tun_interfaces() -> list[str]:
     return interfaces
 
 
-def _interface_is_up(iface: str) -> bool:
+def _interface_is_up(iface: str, *, netns: str | None = None) -> bool:
     try:
-        output = subprocess.check_output(["ip", "-json", "addr", "show", "dev", iface], text=True, timeout=5)
+        if netns:
+            output = run_ip_command(["-json", "addr", "show", "dev", iface], netns=netns)
+        else:
+            output = subprocess.check_output(["ip", "-json", "addr", "show", "dev", iface], text=True, timeout=5)
         rows = json.loads(output)
     except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
         return False
@@ -317,7 +499,7 @@ def _interface_is_up(iface: str) -> bool:
     return False
 
 
-def _collect_network_details(iface: str) -> dict[str, Any]:
+def _collect_network_details(iface: str, *, netns: str | None = None) -> dict[str, Any]:
     network: dict[str, Any] = {
         "ipv4_addresses": [],
         "ipv6_addresses": [],
@@ -326,7 +508,10 @@ def _collect_network_details(iface: str) -> dict[str, Any]:
     }
 
     try:
-        addr_output = subprocess.check_output(["ip", "-json", "addr", "show", "dev", iface], text=True, timeout=5)
+        if netns:
+            addr_output = run_ip_command(["-json", "addr", "show", "dev", iface], netns=netns)
+        else:
+            addr_output = subprocess.check_output(["ip", "-json", "addr", "show", "dev", iface], text=True, timeout=5)
         addr_rows = json.loads(addr_output)
         for row in addr_rows:
             for addr_info in row.get("addr_info") or []:
@@ -342,7 +527,10 @@ def _collect_network_details(iface: str) -> dict[str, Any]:
         pass
 
     try:
-        route_output = subprocess.check_output(["ip", "-json", "route", "show", "dev", iface], text=True, timeout=5)
+        if netns:
+            route_output = run_ip_command(["-json", "route", "show", "dev", iface], netns=netns)
+        else:
+            route_output = subprocess.check_output(["ip", "-json", "route", "show", "dev", iface], text=True, timeout=5)
         routes = json.loads(route_output)
         for route in routes[:10]:
             network["routes"].append(
@@ -361,7 +549,10 @@ def _collect_network_details(iface: str) -> dict[str, Any]:
         network["gateway"] = next((route.get("gateway") for route in network["routes"] if route.get("gateway")), None)
 
     try:
-        link_output = subprocess.check_output(["ip", "-json", "link", "show", "dev", iface], text=True, timeout=5)
+        if netns:
+            link_output = run_ip_command(["-json", "link", "show", "dev", iface], netns=netns)
+        else:
+            link_output = subprocess.check_output(["ip", "-json", "link", "show", "dev", iface], text=True, timeout=5)
         link_rows = json.loads(link_output)
         if link_rows:
             network["mtu"] = link_rows[0].get("mtu")
@@ -381,31 +572,42 @@ def _enrich_network_metrics(
     timeout: float,
     speed_test_bytes: int = DEFAULT_SPEED_TEST_BYTES,
     speed_test_context: SpeedTestRunContext,
+    netns: str | None = None,
 ) -> None:
     if gateway:
-        ping = _ping_host(gateway, count=4, timeout=min(5, timeout / 2))
+        ping = _ping_host(gateway, count=4, timeout=min(5, timeout / 2), netns=netns)
         if ping:
             ping["host"] = gateway
             network["gateway_ping"] = ping
 
     if not speed_test_context.run_speed_test:
-        if speed_test_context.previous_speed_test:
-            cached = dict(speed_test_context.previous_speed_test)
-            cached["cached"] = True
-            network["speed_test"] = cached
+        _apply_cached_speed_test(network, speed_test_context)
+        return
+
+    url = build_speed_test_url(speed_test_context.url_template, speed_test_bytes)
+    if is_cloudflare_speed_test_template(speed_test_context.url_template) and not try_acquire_cloudflare_speed_test_slot():
+        _apply_cached_speed_test(network, speed_test_context, throttled=True)
         return
 
     speed = _measure_download_speed(
-        build_speed_test_url(speed_test_context.url_template, speed_test_bytes),
+        url,
         proxy_url=proxy_url,
         timeout=max(5, timeout),
+        netns=netns,
     )
     if speed:
         network["speed_test"] = speed
+        if speed.get("ok"):
+            network["speed_test_last_success"] = speed
+        elif speed_test_context.last_successful_speed_test:
+            network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
 
     if iface and not network.get("mtu"):
         try:
-            link_output = subprocess.check_output(["ip", "-json", "link", "show", "dev", iface], text=True, timeout=5)
+            if netns:
+                link_output = run_ip_command(["-json", "link", "show", "dev", iface], netns=netns)
+            else:
+                link_output = subprocess.check_output(["ip", "-json", "link", "show", "dev", iface], text=True, timeout=5)
             link_rows = json.loads(link_output)
             if link_rows:
                 network["mtu"] = link_rows[0].get("mtu")
@@ -413,10 +615,41 @@ def _enrich_network_metrics(
             pass
 
 
-def _ping_host(host: str, *, count: int = 4, timeout: float = 5) -> dict[str, Any] | None:
+def _apply_cached_speed_test(
+    network: dict[str, Any],
+    speed_test_context: SpeedTestRunContext,
+    *,
+    throttled: bool = False,
+) -> None:
+    displayed = pick_display_speed_test(
+        speed_test_context.previous_speed_test,
+        speed_test_context.last_successful_speed_test,
+    )
+    if displayed:
+        cached = dict(displayed)
+        cached["cached"] = True
+        if throttled:
+            cached["throttled"] = True
+        network["speed_test"] = cached
+        if speed_test_context.last_successful_speed_test:
+            network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+        return
+
+    if throttled:
+        network["speed_test"] = {
+            "ok": False,
+            "error": "Speed test deferred (Cloudflare throttle — retry on next interval)",
+            "deferred": True,
+        }
+
+
+def _ping_host(host: str, *, count: int = 4, timeout: float = 5, netns: str | None = None) -> dict[str, Any] | None:
+    cmd = ["ping", "-c", str(count), "-W", "1", host]
+    if netns:
+        cmd = ["ip", "netns", "exec", netns, *cmd]
     try:
         output = subprocess.check_output(
-            ["ping", "-c", str(count), "-W", "1", host],
+            cmd,
             text=True,
             stderr=subprocess.STDOUT,
             timeout=timeout,
@@ -476,7 +709,16 @@ def _format_speed_test_error(error: Any) -> str:
     return "Speed test failed"
 
 
-def _measure_download_speed(url: str, *, proxy_url: str | None, timeout: float) -> dict[str, Any] | None:
+def _measure_download_speed(
+    url: str,
+    *,
+    proxy_url: str | None,
+    timeout: float,
+    netns: str | None = None,
+) -> dict[str, Any] | None:
+    if netns:
+        return _measure_download_speed_curl(url, timeout=timeout, netns=netns)
+
     started = time.perf_counter()
     bytes_read = 0
     try:
@@ -559,7 +801,16 @@ def _wait_for_proxy(proxy_url: str, timeout: float) -> bool:
     return False
 
 
-def _probe_endpoint(url: str, timeout: float, proxy_url: str | None = None) -> dict[str, Any]:
+def _probe_endpoint(
+    url: str,
+    timeout: float,
+    proxy_url: str | None = None,
+    *,
+    netns: str | None = None,
+) -> dict[str, Any]:
+    if netns:
+        return _probe_endpoint_via_curl(url, timeout, netns=netns)
+
     started = time.perf_counter()
     try:
         client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
@@ -584,6 +835,102 @@ def _probe_endpoint(url: str, timeout: float, proxy_url: str | None = None) -> d
             "url": url,
             "error": str(exc),
             "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+
+def _probe_endpoint_via_curl(url: str, timeout: float, *, netns: str) -> dict[str, Any]:
+    started = time.perf_counter()
+    cmd = [
+        "ip",
+        "netns",
+        "exec",
+        netns,
+        "curl",
+        "-sS",
+        "-L",
+        "--max-time",
+        str(max(1, int(timeout))),
+        "-w",
+        "\n__HTTP_CODE__:%{http_code}",
+        url,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2, check=False)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "curl probe failed").strip()
+            return {"ok": False, "url": url, "error": error, "latency_ms": latency_ms}
+
+        body, _, status_part = result.stdout.rpartition("\n__HTTP_CODE__:")
+        status_code = int(status_part.split(":", 1)[-1]) if status_part else None
+        body = body.strip()
+        exit_ip = body.splitlines()[0][:64] if body else None
+        return {
+            "ok": status_code is not None and 200 <= status_code < 400,
+            "url": url,
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "exit_ip": exit_ip,
+            "body_preview": body[:200] if body else None,
+        }
+    except (subprocess.SubprocessError, ValueError) as exc:
+        return {
+            "ok": False,
+            "url": url,
+            "error": str(exc),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+
+def _measure_download_speed_curl(url: str, *, timeout: float, netns: str) -> dict[str, Any] | None:
+    started = time.perf_counter()
+    cmd = [
+        "ip",
+        "netns",
+        "exec",
+        netns,
+        "curl",
+        "-sS",
+        "-L",
+        "--max-time",
+        str(max(1, int(timeout))),
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{size_download}",
+        url,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2, check=False)
+        duration_ms = max(int((time.perf_counter() - started) * 1000), 1)
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "curl speed test failed").strip()
+            return {
+                "ok": False,
+                "url": url,
+                "bytes": 0,
+                "duration_ms": duration_ms,
+                "error": error,
+            }
+        bytes_read = int(float(result.stdout.strip() or 0))
+        megabits = (bytes_read * 8) / 1_000_000
+        seconds = duration_ms / 1000
+        mbps = round(megabits / seconds, 2) if seconds > 0 else None
+        return {
+            "ok": True,
+            "url": url,
+            "bytes": bytes_read,
+            "duration_ms": duration_ms,
+            "mbps": mbps,
+        }
+    except (subprocess.SubprocessError, ValueError) as exc:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        return {
+            "ok": False,
+            "url": url,
+            "bytes": 0,
+            "duration_ms": duration_ms,
+            "error": str(exc),
         }
 
 
@@ -677,8 +1024,13 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
     probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
     gateway_ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
     speed_test = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
+    last_success = network.get("speed_test_last_success") if isinstance(network.get("speed_test_last_success"), dict) else {}
     speed_test_ok: bool | None = None
     speed_test_error: str | None = None
+    download_mbps = speed_test.get("mbps")
+    download_bytes = speed_test.get("bytes")
+    download_duration_ms = speed_test.get("duration_ms")
+
     if speed_test:
         if speed_test.get("ok") is True:
             speed_test_ok = True
@@ -686,6 +1038,19 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
             speed_test_ok = False
             raw_error = speed_test.get("error")
             speed_test_error = _format_speed_test_error(raw_error) if raw_error else "Speed test failed"
+            if is_rate_limited_speed_test(speed_test) and last_success.get("mbps") is not None:
+                download_mbps = last_success.get("mbps")
+                download_bytes = last_success.get("bytes")
+                download_duration_ms = last_success.get("duration_ms")
+                speed_test_ok = True
+                speed_test_error = (
+                    f"{speed_test_error} (showing last successful measurement)"
+                )
+        elif speed_test.get("stale") and speed_test.get("mbps") is not None:
+            speed_test_ok = True
+            download_mbps = speed_test.get("mbps")
+            download_bytes = speed_test.get("bytes")
+            download_duration_ms = speed_test.get("duration_ms")
 
     summary = NetworkSummary(
         interface=network.get("interface"),
@@ -702,9 +1067,9 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
         gateway_ping_avg_ms=gateway_ping.get("avg_ms"),
         gateway_ping_loss_percent=gateway_ping.get("loss_percent"),
         gateway_ping_jitter_ms=gateway_ping.get("jitter_ms"),
-        download_mbps=speed_test.get("mbps"),
-        download_bytes=speed_test.get("bytes"),
-        download_duration_ms=speed_test.get("duration_ms"),
+        download_mbps=download_mbps,
+        download_bytes=download_bytes,
+        download_duration_ms=download_duration_ms,
         speed_test_ok=speed_test_ok,
         speed_test_error=speed_test_error,
     )

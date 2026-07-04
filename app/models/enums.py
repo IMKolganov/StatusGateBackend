@@ -17,7 +17,13 @@ class CheckType(str, enum.Enum):
     XRAY = "xray"
 
 
+class ConnectionMode(str, enum.Enum):
+    EPHEMERAL = "ephemeral"
+    PERSISTENT = "persistent"
+
+
 VPN_CHECK_TYPES = frozenset({CheckType.OPENVPN.value, CheckType.XRAY.value})
+PERSISTENT_VPN_CHECK_TYPES = frozenset({CheckType.OPENVPN.value})
 HTTP_CHECK_TYPES = frozenset({CheckType.HTTP_STATUS.value, CheckType.JSON.value, CheckType.XML.value})
 
 
