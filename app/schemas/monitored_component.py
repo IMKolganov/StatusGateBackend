@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.enums import VPN_CHECK_TYPES
+from app.models.enums import VPN_CHECK_TYPES, ConnectionMode
 from app.schemas.network import NetworkSummary, VpnCheckConfig
 from app.services.speed_test_config import validate_speed_test_url_template
 
@@ -15,6 +15,7 @@ MAX_SPEED_TEST_INTERVAL_SECONDS = 86_400
 
 
 CHECK_TYPE_PATTERN = r"^(http_status|json|xml|openvpn|xray)$"
+CONNECTION_MODE_PATTERN = r"^(ephemeral|persistent)$"
 
 
 class MonitoredComponentCreate(BaseModel):
@@ -39,6 +40,7 @@ class MonitoredComponentCreate(BaseModel):
     expected_status_code: int = Field(default=200, ge=100, le=599)
     timeout_seconds: int = Field(default=10, ge=1, le=300)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
+    connection_mode: str = Field(default=ConnectionMode.EPHEMERAL.value, pattern=CONNECTION_MODE_PATTERN)
     is_active: bool = True
 
     @model_validator(mode="after")
@@ -53,7 +55,12 @@ class MonitoredComponentCreate(BaseModel):
                 self.timeout_seconds = 30
             if self.speed_test_url_template is not None:
                 self.speed_test_url_template = validate_speed_test_url_template(self.speed_test_url_template)
+            if self.connection_mode == ConnectionMode.PERSISTENT.value and self.check_type != "openvpn":
+                raise ValueError("persistent connection mode is only supported for openvpn")
             return self
+
+        if self.connection_mode != ConnectionMode.EPHEMERAL.value:
+            raise ValueError("connection_mode is only supported for VPN check types")
 
         if not self.check_url.strip():
             raise ValueError("check_url is required for HTTP check types")
@@ -92,6 +99,7 @@ class MonitoredComponentUpdate(BaseModel):
     expected_status_code: int | None = Field(default=None, ge=100, le=599)
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
+    connection_mode: str | None = Field(default=None, pattern=CONNECTION_MODE_PATTERN)
     is_active: bool | None = None
 
     @model_validator(mode="after")
@@ -99,6 +107,8 @@ class MonitoredComponentUpdate(BaseModel):
         if self.check_type in VPN_CHECK_TYPES or self.check_config is not None:
             if self.check_config is not None:
                 VpnCheckConfig.model_validate(self.check_config)
+        if self.connection_mode == ConnectionMode.PERSISTENT.value and self.check_type not in (None, "openvpn"):
+            raise ValueError("persistent connection mode is only supported for openvpn")
         if self.speed_test_url_template is not None:
             self.speed_test_url_template = validate_speed_test_url_template(self.speed_test_url_template)
         return self
@@ -125,6 +135,7 @@ class MonitoredComponentResponse(BaseModel):
     expected_status_code: int
     timeout_seconds: int
     poll_interval_seconds: int | None
+    connection_mode: str = ConnectionMode.EPHEMERAL.value
     last_checked_at: datetime | None
     is_active: bool
     latest_outcome: str | None = None

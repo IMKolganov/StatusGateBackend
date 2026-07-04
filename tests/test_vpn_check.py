@@ -136,6 +136,30 @@ class TestVpnHelpers:
         assert summary.download_bytes == 0
         assert summary.download_duration_ms == 245
 
+    def test_public_network_summary_rate_limit_shows_last_success(self) -> None:
+        details = {
+            "network": {
+                "interface": "tun0",
+                "probe": {"url": "https://ifconfig.me/ip", "exit_ip": "203.0.113.1", "latency_ms": 85},
+                "speed_test": {
+                    "ok": False,
+                    "error": "Speed test rate limited (HTTP 429)",
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "mbps": 18.5,
+                    "bytes": 524288,
+                    "duration_ms": 800,
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps == 18.5
+        assert summary.speed_test_ok is True
+        assert summary.speed_test_error is not None
+        assert "last successful measurement" in summary.speed_test_error
+
     def test_format_speed_test_error_from_httpx_message(self) -> None:
         raw = (
             "Client error '429 Too Many Requests' for url "
