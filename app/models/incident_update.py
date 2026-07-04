@@ -1,5 +1,11 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from app.models.incident import Incident
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID

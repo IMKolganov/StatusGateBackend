@@ -1,6 +1,6 @@
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 T = TypeVar("T")
 
@@ -28,8 +28,8 @@ class ApiResponse(BaseModel, Generic[T]):
         status_code: int,
         detail: str | None = None,
         trace_id: str | None = None,
-    ) -> "ApiResponse[ApiErrorData | None]":
-        return cls(
+    ) -> ApiResponse[ApiErrorData]:
+        return ApiResponse[ApiErrorData](
             success=False,
             message=message,
             data=ApiErrorData(status_code=status_code, detail=detail, trace_id=trace_id),

@@ -1,12 +1,13 @@
 from collections.abc import Generator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_auth_service, get_db, require_access_roles
 from app.api.pagination import to_paginated_response
 from app.cqrs.common import PaginationParams
+from app.models.account import Account
 from app.schemas.account_admin import AccountAdminResponse, AccountRolesUpdate
 from app.schemas.pagination import paginated_of
 from app.services.account_admin_service import AccountAdminService
@@ -21,7 +22,7 @@ def get_account_admin_service(db: Session = Depends(get_db)) -> Generator[Accoun
     yield AccountAdminService(db)
 
 
-def _to_admin_response(account, auth_service: AuthService) -> AccountAdminResponse:
+def _to_admin_response(account: Account, auth_service: AuthService) -> AccountAdminResponse:
     base = auth_service.to_account_response(account)
     return AccountAdminResponse(
         id=account.id,

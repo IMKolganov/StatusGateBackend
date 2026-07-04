@@ -1,4 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from app.models.incident import Incident
+    from app.models.monitored_component import MonitoredComponent
 
 from sqlalchemy import Boolean, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID

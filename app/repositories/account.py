@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.models.access_role import AccessRole
 from app.models.account import Account
 from app.repositories.base import Repository
 
@@ -29,7 +30,7 @@ class AccountRepository(Repository[Account, UUID]):
         stmt = select(func.count()).select_from(Account)
         return self.session.scalar(stmt) or 0
 
-    def assign_access_role(self, account: Account, access_role) -> Account:
+    def assign_access_role(self, account: Account, access_role: AccessRole) -> Account:
         if access_role not in account.access_roles:
             account.access_roles.append(access_role)
             self.session.flush()

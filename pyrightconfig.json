@@ -1,6 +1,23 @@
 {
-  "venvPath": ".",
-  "venv": ".venv",
   "include": ["app", "tests", "alembic"],
-  "exclude": ["**/__pycache__", ".venv"]
+  "exclude": ["**/__pycache__", ".venv"],
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.14",
+  "extraPaths": ["."],
+  "reportUnknownMemberType": "warning",
+  "reportUnknownVariableType": "warning",
+  "reportUnknownArgumentType": "warning",
+  "reportUnknownParameterType": "warning",
+  "reportUnknownLambdaType": "warning",
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "extraPaths": ["."],
+      "reportPrivateUsage": "none",
+      "reportMissingParameterType": "warning",
+      "reportMissingTypeArgument": "warning",
+      "reportUntypedFunctionDecorator": "none",
+      "reportOptionalSubscript": "warning"
+    }
+  ]
 }

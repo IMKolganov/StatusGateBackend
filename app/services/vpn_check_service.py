@@ -397,29 +397,30 @@ def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedT
                     },
                 )
 
-            network = {
+            network: dict[str, Any] = {
                 "connect_time_ms": connect_time_ms,
                 "proxy_url": _mask_proxy(proxy_url),
                 "inbound_protocol": _xray_inbound_protocol(config),
             }
 
-            probe = _probe_endpoint(probe_url, timeout=min(15, timeout), proxy_url=proxy_url)
-            network["probe"] = probe
+            probe_result = _probe_endpoint(probe_url, timeout=min(15, timeout), proxy_url=proxy_url)
+            network["probe"] = probe_result
 
-            if probe.get("ok"):
+            probe_ok = bool(probe_result.get("ok"))
+            if probe_ok:
                 speed_test_bytes = _speed_test_bytes_for(component)
                 _enrich_network_metrics(
                     network,
                     gateway=None,
                     proxy_url=proxy_url,
                     iface=None,
-                    timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+                    timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe_result.get("latency_ms") or 0) / 1000)),
                     speed_test_bytes=speed_test_bytes,
                     speed_test_context=speed_test_context,
                 )
 
-            outcome = CheckOutcome.UP.value if probe.get("ok") else CheckOutcome.DOWN.value
-            error_message = None if probe.get("ok") else probe.get("error") or "Probe through Xray proxy failed"
+            outcome = CheckOutcome.UP.value if probe_ok else CheckOutcome.DOWN.value
+            error_message = None if probe_ok else probe_result.get("error") or "Probe through Xray proxy failed"
             log_tail = _read_tail(log_path)
             details: dict[str, Any] = {
                 "check_type": component.check_type,
@@ -433,7 +434,7 @@ def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedT
                 checked_at=checked_at,
                 outcome=outcome,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                http_status_code=probe.get("status_code"),
+                http_status_code=probe_result.get("status_code"),
                 error_message=error_message,
                 details=details,
             )
@@ -1021,10 +1022,14 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
     if not isinstance(network, dict):
         return None
 
-    probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
-    gateway_ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
-    speed_test = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
-    last_success = network.get("speed_test_last_success") if isinstance(network.get("speed_test_last_success"), dict) else {}
+    probe_value = network.get("probe")
+    probe: dict[str, Any] = probe_value if isinstance(probe_value, dict) else {}
+    gateway_ping_value = network.get("gateway_ping")
+    gateway_ping: dict[str, Any] = gateway_ping_value if isinstance(gateway_ping_value, dict) else {}
+    speed_test_value = network.get("speed_test")
+    speed_test: dict[str, Any] = speed_test_value if isinstance(speed_test_value, dict) else {}
+    last_success_value = network.get("speed_test_last_success")
+    last_success: dict[str, Any] = last_success_value if isinstance(last_success_value, dict) else {}
     speed_test_ok: bool | None = None
     speed_test_error: str | None = None
     download_mbps = speed_test.get("mbps")

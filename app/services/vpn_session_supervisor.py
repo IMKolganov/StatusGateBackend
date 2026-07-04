@@ -6,15 +6,17 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models.check_result import CheckResult
-from app.models.enums import CheckOutcome, CheckType, ConnectionMode, PERSISTENT_VPN_CHECK_TYPES
+from app.models.enums import CheckOutcome, ConnectionEventType, ConnectionMode, PERSISTENT_VPN_CHECK_TYPES
 from app.models.monitored_component import MonitoredComponent
 from app.models.project import Project
+from app.services.connection_event_service import record_connection_event
 from app.services.monitoring_service import CheckResultRepository, HealthCheckRunner, MonitoringSettingsRepository
 from app.services.speed_test_config import (
     SpeedTestRunContext,
@@ -35,6 +37,16 @@ from app.services.vpn_check_service import (
 logger = logging.getLogger(__name__)
 
 
+def _connection_event_details(details: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(details, dict):
+        return None
+    network = details.get("network")
+    if not isinstance(network, dict):
+        return None
+    probe = network.get("probe")
+    return {"probe": probe} if isinstance(probe, dict) else None
+
+
 @dataclass(frozen=True)
 class _PersistentComponentSnapshot:
     component_id: UUID
@@ -48,55 +60,74 @@ class _PersistentOpenVpnWorker(threading.Thread):
         super().__init__(name=f"vpn-persist-{component_id}", daemon=True)
         self._component_id = component_id
         self._stop = stop_event
+        self._last_probe_ok: bool | None = None
 
     def run(self) -> None:
         handle: OpenVpnSessionHandle | None = None
-        while not self._stop.is_set():
-            component = self._load_component()
-            if component is None or not self._should_run(component):
-                break
+        component: MonitoredComponent | None = None
+        try:
+            while not self._stop.is_set():
+                component = self._load_component()
+                if component is None or not self._should_run(component):
+                    break
 
-            try:
-                if handle is None or not is_openvpn_persistent_session_up(handle):
+                try:
+                    if handle is None or not is_openvpn_persistent_session_up(handle):
+                        if handle is not None:
+                            self._save_session_event(component, handle, ConnectionEventType.TUNNEL_DOWN.value)
+                            stop_openvpn_persistent_session(handle)
+                            handle = None
+                            if self._stop.wait(RECONNECT_DELAY_SECONDS):
+                                break
+                            self._save_session_event(component, None, ConnectionEventType.RECONNECT.value)
+
+                        handle = start_openvpn_persistent_session(component)
+                        if handle is None:
+                            self._save_connect_failure(component)
+                            if self._stop.wait(RECONNECT_DELAY_SECONDS):
+                                break
+                            continue
+
+                        self._save_session_event(component, handle, ConnectionEventType.TUNNEL_UP.value)
+
+                    speed_test_context = self._build_speed_test_context(component)
+                    result = run_openvpn_persistent_probe(
+                        component,
+                        handle,
+                        speed_test_context=speed_test_context,
+                        session_event="probe",
+                    )
+                    self._persist_result(component, result)
+                    self._maybe_record_probe_transition(component, result)
+
+                    interval = self._probe_interval_seconds(component)
+                    if self._stop.wait(interval):
+                        break
+                except Exception:
+                    logger.exception("Persistent OpenVPN worker failed for component %s", self._component_id)
                     if handle is not None:
-                        self._save_session_event(component, handle, "tunnel_down")
                         stop_openvpn_persistent_session(handle)
                         handle = None
-                        if self._stop.wait(RECONNECT_DELAY_SECONDS):
-                            break
-                        self._save_session_event(component, None, "reconnect")
-
-                    handle = start_openvpn_persistent_session(component)
-                    if handle is None:
-                        self._save_connect_failure(component)
-                        if self._stop.wait(RECONNECT_DELAY_SECONDS):
-                            break
-                        continue
-
-                    self._save_session_event(component, handle, "tunnel_up")
-
-                speed_test_context = self._build_speed_test_context(component)
-                result = run_openvpn_persistent_probe(
-                    component,
-                    handle,
-                    speed_test_context=speed_test_context,
-                    session_event="probe",
-                )
-                self._persist_result(component, result)
-
-                interval = self._probe_interval_seconds(component)
-                if self._stop.wait(interval):
-                    break
-            except Exception:
-                logger.exception("Persistent OpenVPN worker failed for component %s", self._component_id)
-                if handle is not None:
-                    stop_openvpn_persistent_session(handle)
-                    handle = None
-                if self._stop.wait(RECONNECT_DELAY_SECONDS):
-                    break
-
-        if handle is not None:
-            stop_openvpn_persistent_session(handle)
+                        self._safe_record_connection_event(
+                            component,
+                            ConnectionEventType.TUNNEL_DOWN.value,
+                            outcome=CheckOutcome.DOWN.value,
+                            message="VPN session stopped after worker error",
+                        )
+                    if self._stop.wait(RECONNECT_DELAY_SECONDS):
+                        break
+        finally:
+            if handle is not None:
+                stop_openvpn_persistent_session(handle)
+                if component is None:
+                    component = self._load_component()
+                if component is not None:
+                    self._safe_record_connection_event(
+                        component,
+                        ConnectionEventType.TUNNEL_DOWN.value,
+                        outcome=CheckOutcome.DOWN.value,
+                        message="VPN session stopped",
+                    )
 
     def _load_component(self) -> MonitoredComponent | None:
         with SessionLocal() as session:
@@ -139,22 +170,109 @@ class _PersistentOpenVpnWorker(threading.Thread):
             CheckResultRepository(session).add(result)
             session.commit()
 
+    def _record_connection_event(
+        self,
+        component: MonitoredComponent,
+        event_type: str,
+        *,
+        occurred_at: datetime | None = None,
+        outcome: str | None = None,
+        message: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with SessionLocal() as session:
+            record_connection_event(
+                session,
+                component_id=component.id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                outcome=outcome,
+                message=message,
+                details=details,
+            )
+            session.commit()
+
+    def _safe_record_connection_event(
+        self,
+        component: MonitoredComponent,
+        event_type: str,
+        *,
+        occurred_at: datetime | None = None,
+        outcome: str | None = None,
+        message: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            self._record_connection_event(
+                component,
+                event_type,
+                occurred_at=occurred_at,
+                outcome=outcome,
+                message=message,
+                details=details,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record connection event %s for component %s",
+                event_type,
+                component.id,
+            )
+
+    def _maybe_record_probe_transition(self, component: MonitoredComponent, result: CheckResult) -> None:
+        if result.outcome not in {CheckOutcome.UP.value, CheckOutcome.DEGRADED.value}:
+            return
+
+        probe_ok = result.outcome == CheckOutcome.UP.value
+        details = result.details if isinstance(result.details, dict) else None
+        network = details.get("network") if isinstance(details, dict) else None
+        probe = network.get("probe") if isinstance(network, dict) else None
+        event_details = {"probe": probe} if isinstance(probe, dict) else None
+
+        if self._last_probe_ok is False and probe_ok:
+            self._record_connection_event(
+                component,
+                ConnectionEventType.AVAILABLE.value,
+                occurred_at=result.checked_at,
+                outcome=result.outcome,
+                message="Probe succeeded through VPN tunnel",
+                details=event_details,
+            )
+        elif self._last_probe_ok is not False and not probe_ok:
+            self._record_connection_event(
+                component,
+                ConnectionEventType.UNAVAILABLE.value,
+                occurred_at=result.checked_at,
+                outcome=result.outcome,
+                message=result.error_message or "Probe failed through VPN tunnel",
+                details=event_details,
+            )
+
+        self._last_probe_ok = probe_ok
+
     def _save_connect_failure(self, component: MonitoredComponent) -> None:
         checked_at = datetime.now(UTC)
+        message = "OpenVPN tunnel did not come up in time"
         result = CheckResult(
             monitored_component_id=component.id,
             checked_at=checked_at,
             outcome=CheckOutcome.TIMEOUT.value,
             latency_ms=None,
             http_status_code=None,
-            error_message="OpenVPN tunnel did not come up in time",
+            error_message=message,
             details={
                 "check_type": component.check_type,
                 "connection_mode": ConnectionMode.PERSISTENT.value,
-                "session_event": "connect_failed",
+                "session_event": ConnectionEventType.CONNECT_FAILED.value,
             },
         )
         self._persist_result(component, result)
+        self._record_connection_event(
+            component,
+            ConnectionEventType.CONNECT_FAILED.value,
+            occurred_at=checked_at,
+            outcome=CheckOutcome.TIMEOUT.value,
+            message=message,
+        )
 
     def _save_session_event(
         self,
@@ -164,13 +282,14 @@ class _PersistentOpenVpnWorker(threading.Thread):
     ) -> None:
         if handle is None:
             checked_at = datetime.now(UTC)
+            message = f"VPN session event: {event}"
             result = CheckResult(
                 monitored_component_id=component.id,
                 checked_at=checked_at,
                 outcome=CheckOutcome.DOWN.value,
                 latency_ms=None,
                 http_status_code=None,
-                error_message=f"VPN session event: {event}",
+                error_message=message,
                 details={
                     "check_type": component.check_type,
                     "connection_mode": ConnectionMode.PERSISTENT.value,
@@ -178,11 +297,17 @@ class _PersistentOpenVpnWorker(threading.Thread):
                 },
             )
             self._persist_result(component, result)
+            self._record_connection_event(
+                component,
+                event,
+                occurred_at=checked_at,
+                outcome=CheckOutcome.DOWN.value,
+                message=message,
+            )
             return
 
-        speed_test_context = SpeedTestRunContext.default()
         speed_test_context = SpeedTestRunContext(
-            url_template=speed_test_context.url_template,
+            url_template=SpeedTestRunContext.default().url_template,
             run_speed_test=False,
         )
         result = run_openvpn_persistent_probe(
@@ -192,6 +317,14 @@ class _PersistentOpenVpnWorker(threading.Thread):
             session_event=event,
         )
         self._persist_result(component, result)
+        self._record_connection_event(
+            component,
+            event,
+            occurred_at=result.checked_at,
+            outcome=result.outcome,
+            message=result.error_message,
+            details=_connection_event_details(result.details if isinstance(result.details, dict) else None),
+        )
 
 
 class VpnSessionSupervisor:

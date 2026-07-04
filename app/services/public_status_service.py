@@ -13,6 +13,7 @@ from app.models.enums import CheckOutcome, IncidentUpdateStatus
 from app.models.incident import Incident
 from app.models.incident_update import IncidentUpdate
 from app.models.monitored_component import MonitoredComponent
+from app.schemas.network import NetworkSummary
 from app.schemas.public_status import (
     PublicActiveAlert,
     PublicComponentGroupTimeline,
@@ -236,7 +237,7 @@ class PublicStatusService:
     def _latest_check_results(
         self,
         component_ids: list[UUID],
-    ) -> dict[UUID, tuple[str, int | None, datetime | None, dict | None]]:
+    ) -> dict[UUID, tuple[str, int | None, datetime | None, NetworkSummary | None]]:
         if not component_ids:
             return {}
 
@@ -300,15 +301,14 @@ class PublicStatusService:
             component_id, day = key
             downtime_seconds = 0
             if include_downtime:
-                continuing_outage = is_outage_outcome(
-                    _outcome_at_end_of_previous_day(
-                        component_id,
-                        day,
-                        range_start,
-                        pre_range_outcomes,
-                        events_by_key,
-                    )
+                previous_outcome = _outcome_at_end_of_previous_day(
+                    component_id,
+                    day,
+                    range_start,
+                    pre_range_outcomes,
+                    events_by_key,
                 )
+                continuing_outage = previous_outcome is not None and is_outage_outcome(previous_outcome)
                 downtime_seconds = compute_downtime_seconds(
                     events,
                     day=day,
@@ -378,7 +378,7 @@ class PublicStatusService:
         self,
         project_id: UUID,
         components: list[MonitoredComponent],
-        latest_by_component: dict[UUID, tuple[str, int | None, datetime | None]],
+        latest_by_component: dict[UUID, tuple[str, int | None, datetime | None, NetworkSummary | None]],
     ) -> list[PublicActiveAlert]:
         alerts: list[PublicActiveAlert] = []
         seen_titles: set[str] = set()

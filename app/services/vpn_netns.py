@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from typing import Any
 from uuid import UUID
 
 
@@ -38,11 +39,11 @@ def delete_netns(name: str) -> None:
     subprocess.run(["ip", "netns", "delete", name], check=False, capture_output=True)
 
 
-def netns_exec(name: str, cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+def netns_exec(name: str, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["ip", "netns", "exec", name, *cmd], **kwargs)
 
 
-def netns_popen(name: str, cmd: list[str], **kwargs) -> subprocess.Popen:
+def netns_popen(name: str, cmd: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
     return subprocess.Popen(["ip", "netns", "exec", name, *cmd], **kwargs)
 
 

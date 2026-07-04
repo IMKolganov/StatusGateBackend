@@ -14,7 +14,7 @@ from app.models.component_kind import OPENVPN_COMPONENT_KIND_ID, WEB_COMPONENT_K
 from app.models.enums import CheckType
 from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
-from app.schemas.monitored_component import MonitoredComponentCreate, MonitoredComponentUpdate
+from app.schemas.monitored_component import MonitoredComponentCreate
 from app.schemas.monitoring import MonitoringSettingsUpdate
 from app.services import vpn_check_service as vpn
 from app.services.monitoring_admin_service import MonitoringAdminService
