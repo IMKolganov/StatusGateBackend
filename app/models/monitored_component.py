@@ -1,5 +1,14 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from app.models.check_result import CheckResult
+    from app.models.component_kind import ComponentKind
+    from app.models.connection_event import ConnectionEvent
+    from app.models.project import Project
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
@@ -42,7 +51,7 @@ class MonitoredComponent(BaseModel[UUID]):
         default=CheckType.HTTP_STATUS.value,
         server_default=CheckType.HTTP_STATUS.value,
     )
-    check_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    check_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     speed_test_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     speed_test_url_template: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     speed_test_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -60,6 +69,10 @@ class MonitoredComponent(BaseModel[UUID]):
     project: Mapped["Project"] = relationship(back_populates="monitored_components")
     component_kind: Mapped["ComponentKind"] = relationship()
     check_results: Mapped[list["CheckResult"]] = relationship(
+        back_populates="monitored_component",
+        cascade="all, delete-orphan",
+    )
+    connection_events: Mapped[list["ConnectionEvent"]] = relationship(
         back_populates="monitored_component",
         cascade="all, delete-orphan",
     )

@@ -3,6 +3,8 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from sqlalchemy.orm import Session
+
 from app.api.deps import get_auth_service, get_current_account, get_db
 from app.auth.cookies import clear_auth_cookies, get_refresh_token_from_request, set_auth_cookies
 from app.auth.google_token import verify_google_id_token
@@ -41,16 +43,20 @@ def _upsert_google_user(
     userinfo: dict[str, str | None],
     auth_service: AuthService,
 ) -> tuple[Account, str | None, str | None]:
+    google_sub = userinfo.get("sub")
+    email = userinfo.get("email")
+    if not google_sub or not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google profile not available")
     return auth_service.upsert_google_account(
-        google_sub=userinfo["sub"],
-        email=userinfo["email"],
+        google_sub=google_sub,
+        email=email,
         full_name=userinfo.get("name"),
         avatar_url=userinfo.get("picture"),
     )
 
 
 @router.get("/registration-status", response_model=RegistrationStatusResponse)
-def registration_status(db=Depends(get_db)) -> RegistrationStatusResponse:
+def registration_status(db: Session = Depends(get_db)) -> RegistrationStatusResponse:
     count = AccountQueryHandler(db).count_all()
     return RegistrationStatusResponse(
         allow_registration=settings.allow_registration or count == 0,
@@ -67,7 +73,7 @@ def register(payload: RegisterRequest, auth_service: AuthService = Depends(get_a
 
 
 @router.post("/login")
-@limiter.limit(settings.auth_login_rate_limit)
+@limiter.limit(settings.auth_login_rate_limit)  # pyright: ignore[reportUntypedFunctionDecorator]
 def login(
     request: Request,
     payload: LoginRequest,
@@ -82,7 +88,7 @@ def login(
 
 
 @router.post("/login/2fa")
-@limiter.limit(settings.auth_login_rate_limit)
+@limiter.limit(settings.auth_login_rate_limit)  # pyright: ignore[reportUntypedFunctionDecorator]
 def login_2fa(
     request: Request,
     payload: TwoFactorVerifyRequest,

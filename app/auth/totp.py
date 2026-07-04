@@ -21,5 +21,5 @@ def verify_totp_code(*, secret: str, code: str) -> bool:
 def build_totp_qr_base64(*, otpauth_url: str) -> str:
     image = qrcode.make(otpauth_url)
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
+    image.save(buffer, "PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")

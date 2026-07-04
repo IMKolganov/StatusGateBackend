@@ -1,10 +1,13 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.orm import Session
 
 from app.models.check_result import CheckResult
+from app.models.connection_event import ConnectionEvent
 from app.models.enums import VPN_CHECK_TYPES, ConnectionMode, PERSISTENT_VPN_CHECK_TYPES
 from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
@@ -111,9 +114,38 @@ class CheckResultRepository:
             .where(CheckResult.id.not_in(keep_ids))
         )
         result = self._session.execute(delete_stmt)
-        deleted = result.rowcount or 0
+        deleted = cast(CursorResult[Any], result).rowcount or 0
         remaining = total - deleted
         return deleted, remaining
+
+
+class ConnectionEventRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def list_for_component_paginated(
+        self,
+        component_id: UUID,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[ConnectionEvent], int]:
+        filters = [ConnectionEvent.monitored_component_id == component_id]
+        count_stmt = select(func.count()).select_from(ConnectionEvent).where(*filters)
+        total = self._session.scalar(count_stmt) or 0
+        stmt = (
+            select(ConnectionEvent)
+            .where(*filters)
+            .order_by(ConnectionEvent.occurred_at.desc(), ConnectionEvent.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self._session.scalars(stmt).all()), total
+
+    def purge_for_component(self, component_id: UUID) -> int:
+        delete_stmt = delete(ConnectionEvent).where(ConnectionEvent.monitored_component_id == component_id)
+        result = self._session.execute(delete_stmt)
+        return cast(CursorResult[Any], result).rowcount or 0
 
 
 class HealthCheckRunner:

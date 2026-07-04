@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from uuid import UUID, uuid4
 
 from sqlalchemy import String, Text

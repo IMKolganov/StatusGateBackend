@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import psycopg
+from psycopg import sql
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -26,7 +28,7 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_has_single_head() -> None:
     heads = _script_directory().get_heads()
-    assert heads == ["013"], f"expected single head 013, got {heads}"
+    assert heads == ["014"], f"expected single head 014, got {heads}"
 
 
 def test_alembic_revision_ids_are_unique() -> None:
@@ -90,7 +92,7 @@ def _ensure_database(database_url: str) -> None:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
             if cur.fetchone() is None:
-                cur.execute(f'CREATE DATABASE "{db_name}"')
+                cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
 
 
 def _drop_database(database_url: str) -> None:
@@ -106,7 +108,7 @@ def _drop_database(database_url: str) -> None:
                 """,
                 (db_name,),
             )
-            cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+            cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(db_name)))
 
 
 @pytest.mark.integration
@@ -116,6 +118,7 @@ def test_alembic_upgrade_head_on_empty_database() -> None:
         "postgresql+psycopg://statusgate:statusgate@localhost:5432/statusgate_test",
     )
     migration_db_url = _with_database_name(base_database_url, "statusgate_migration_test")
+    engine = None
 
     try:
         _drop_database(migration_db_url)
@@ -129,19 +132,113 @@ def test_alembic_upgrade_head_on_empty_database() -> None:
 
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "013"
+        assert version == "014"
 
         columns = {column["name"] for column in inspector.get_columns("monitored_components")}
         assert "speed_test_url_template" in columns
         assert "speed_test_interval_seconds" in columns
         assert "speed_test_enabled" in columns
         assert "connection_mode" in columns
+        event_columns = {column["name"] for column in inspector.get_columns("connection_events")}
+        assert "event_type" in event_columns
+        assert "occurred_at" in event_columns
         settings_columns = {column["name"] for column in inspector.get_columns("monitoring_settings")}
         assert "default_speed_test_url_template" in settings_columns
         assert "default_speed_test_interval_seconds" in settings_columns
     except (psycopg.Error, OperationalError) as exc:
         pytest.skip(f"PostgreSQL is not available for migration integration test: {exc}")
     finally:
+        if engine is not None:
+            engine.dispose()
+        try:
+            _drop_database(migration_db_url)
+        except psycopg.Error:
+            pass
+
+@pytest.mark.integration
+def test_migration_backfills_connection_events_from_check_results() -> None:
+    base_database_url = os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql+psycopg://statusgate:statusgate@localhost:5432/statusgate_test",
+    )
+    migration_db_url = _with_database_name(base_database_url, "statusgate_connection_events_backfill_test")
+    engine = None
+
+    try:
+        _drop_database(migration_db_url)
+        _ensure_database(migration_db_url)
+        command.upgrade(_alembic_config(migration_db_url), "013")
+
+        engine = create_engine(migration_db_url, pool_pre_ping=True)
+        project_id = uuid4()
+        kind_id = uuid4()
+        component_id = uuid4()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO projects (id, name, slug, description, is_active, created_at, updated_at)
+                    VALUES (:project_id, 'Backfill', 'backfill', NULL, true, now(), now())
+                    """
+                ),
+                {"project_id": project_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO component_kinds (id, name, slug, description, created_at, updated_at)
+                    VALUES (:kind_id, 'OpenVPN', 'openvpn-backfill', NULL, now(), now())
+                    """
+                ),
+                {"kind_id": kind_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO monitored_components (
+                        id, project_id, component_kind_id, name, slug, check_url, check_method,
+                        expected_status_code, timeout_seconds, check_type, connection_mode, is_active,
+                        speed_test_enabled, created_at, updated_at
+                    )
+                    VALUES (
+                        :component_id, :project_id, :kind_id, 'VPN', 'vpn-backfill', 'https://example.com', 'GET',
+                        200, 60, 'openvpn', 'persistent', true, true, now(), now()
+                    )
+                    """
+                ),
+                {"component_id": component_id, "project_id": project_id, "kind_id": kind_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO check_results (
+                        id, monitored_component_id, checked_at, outcome, details, created_at, updated_at
+                    )
+                    VALUES (
+                        gen_random_uuid(), :component_id, now(), 'down',
+                        '{"session_event":"reconnect","connection_mode":"persistent"}'::jsonb,
+                        now(), now()
+                    )
+                    """
+                ),
+                {"component_id": component_id},
+            )
+
+        command.upgrade(_alembic_config(migration_db_url), "head")
+
+        with engine.connect() as conn:
+            count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM connection_events WHERE monitored_component_id = :component_id"
+                ),
+                {"component_id": component_id},
+            ).scalar_one()
+        assert count == 1
+    except (psycopg.Error, OperationalError) as exc:
+        pytest.skip(f"PostgreSQL is not available for migration integration test: {exc}")
+    finally:
+        if engine is not None:
+            engine.dispose()
         try:
             _drop_database(migration_db_url)
         except psycopg.Error:
@@ -154,15 +251,21 @@ def test_compose_database_is_at_head_revision() -> None:
         "COMPOSE_DATABASE_URL",
         "postgresql+psycopg://statusgate:statusgate@localhost:5432/statusgate",
     )
+    engine = None
     try:
         engine = create_engine(database_url, pool_pre_ping=True)
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "013"
+        assert version == "014"
 
         columns = {column["name"] for column in inspect(engine).get_columns("monitored_components")}
         assert "speed_test_bytes" in columns
         assert "speed_test_url_template" in columns
         assert "connection_mode" in columns
+        event_columns = {column["name"] for column in inspect(engine).get_columns("connection_events")}
+        assert "event_type" in event_columns
     except (psycopg.Error, OperationalError) as exc:
         pytest.skip(f"Compose PostgreSQL is not available: {exc}")
+    finally:
+        if engine is not None:
+            engine.dispose()

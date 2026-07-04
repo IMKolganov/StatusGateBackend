@@ -1,4 +1,5 @@
-from typing import TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -8,7 +9,7 @@ T = TypeVar("T")
 S = TypeVar("S", bound=BaseModel)
 
 
-def to_paginated_response(result: PaginatedResult[T], mapper) -> dict:
+def to_paginated_response(result: PaginatedResult[T], mapper: Callable[[T], S]) -> dict[str, Any]:
     return {
         "items": [mapper(item) for item in result.items],
         "total": result.total,

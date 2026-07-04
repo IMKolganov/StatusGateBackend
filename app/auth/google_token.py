@@ -17,7 +17,7 @@ def _get_jwk_client() -> PyJWKClient:
     return _jwk_client
 
 
-def verify_google_id_token(credential: str) -> dict[str, str]:
+def verify_google_id_token(credential: str) -> dict[str, str | None]:
     try:
         signing_key = _get_jwk_client().get_signing_key_from_jwt(credential)
         data = jwt.decode(

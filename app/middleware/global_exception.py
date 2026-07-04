@@ -1,9 +1,10 @@
 import json
 import logging
 from asyncio import CancelledError
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
@@ -20,7 +21,7 @@ SKIP_PATHS = {"/health"}
 
 
 class GlobalExceptionMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable):
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         if _should_skip_request(request):
             return await call_next(request)
 
@@ -40,15 +41,15 @@ class GlobalExceptionMiddleware(BaseHTTPMiddleware):
         return await _normalize_success_response(request, response)
 
 
-def register_exception_handlers(app) -> None:
+def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(HTTPException)
-    async def http_exception_handler(request: Request, exc: HTTPException):
+    async def http_exception_handler(request: Request, exc: HTTPException):  # pyright: ignore[reportUnusedFunction]
         if _should_skip_request(request):
             return JSONResponse(status_code=exc.status_code, content={"detail": _http_exception_detail(exc)})
         return _error_json(request, exc.status_code, _http_exception_message(exc), detail=_http_exception_detail(exc))
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):  # pyright: ignore[reportUnusedFunction]
         detail = "; ".join(
             f"{'.'.join(str(part) for part in error.get('loc', []) if part != 'body')}: {error.get('msg')}"
             for error in exc.errors()
@@ -56,7 +57,7 @@ def register_exception_handlers(app) -> None:
         return _error_json(request, 422, "Validation failed.", detail=detail or None)
 
     @app.exception_handler(RateLimitExceeded)
-    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):  # pyright: ignore[reportUnusedFunction]
         return _error_json(request, 429, "Too many requests. Please try again later.", detail=str(exc.detail))
 
 
@@ -147,7 +148,7 @@ def _error_json(request: Request, status_code: int, message: str, *, detail: str
     return _json_response(payload, status_code=status_code)
 
 
-def _json_response(payload: dict, *, status_code: int) -> JSONResponse:
+def _json_response(payload: dict[str, Any], *, status_code: int) -> JSONResponse:
     response = JSONResponse(status_code=status_code, content=payload)
     trace_id = None
     if isinstance(payload.get("data"), dict):
@@ -162,37 +163,39 @@ async def _read_body(response: Response) -> bytes:
     if body_iterator is not None:
         chunks: list[bytes] = []
         async for chunk in body_iterator:
-            chunks.append(chunk)
+            chunks.append(cast(bytes, chunk))
         return b"".join(chunks)
 
     if isinstance(response, StreamingResponse):
-        chunks: list[bytes] = []
+        stream_chunks: list[bytes] = []
         async for chunk in response.body_iterator:
-            chunks.append(chunk)
-        return b"".join(chunks)
+            stream_chunks.append(cast(bytes, chunk))
+        return b"".join(stream_chunks)
 
     return getattr(response, "body", b"") or b""
 
 
 def _http_exception_message(exc: HTTPException) -> str:
-    detail = exc.detail
-    if isinstance(detail, str):
+    detail: object = exc.detail
+    if type(detail) is str:
         return detail
-    if isinstance(detail, dict) and "message" in detail:
-        return str(detail["message"])
+    if isinstance(detail, dict):
+        message = detail.get("message")
+        if message is not None:
+            return str(message)
     return "Request failed."
 
 
 def _http_exception_detail(exc: HTTPException) -> str | None:
-    detail = exc.detail
-    if isinstance(detail, str):
+    detail: object = exc.detail
+    if type(detail) is str:
         return detail
     if isinstance(detail, (dict, list)):
         return json.dumps(detail)
     return str(detail)
 
 
-def _extract_error_message(parsed) -> str:
+def _extract_error_message(parsed: object) -> str:
     if isinstance(parsed, dict):
         detail = parsed.get("detail")
         if isinstance(detail, str):

@@ -5,12 +5,13 @@ from sqlalchemy.orm import Session
 
 from app.cqrs.common import PaginatedResult, PaginationParams
 from app.models.check_result import CheckResult
+from app.models.connection_event import ConnectionEvent
 from app.models.monitored_component import MonitoredComponent
-from app.models.enums import VPN_CHECK_TYPES
+from app.models.enums import PERSISTENT_VPN_CHECK_TYPES, VPN_CHECK_TYPES, ConnectionMode
 from app.schemas.monitoring import MonitoringSettingsResponse, MonitoringSettingsUpdate, PurgeCheckHistoryResponse, SpeedTestAdvisoryResponse
 from app.schemas.monitored_component import MonitoredComponentResponse
 from app.services.catalog_service import MonitoredComponentService
-from app.services.monitoring_service import CheckResultRepository, HealthCheckRunner, MonitoringSettingsRepository
+from app.services.monitoring_service import CheckResultRepository, ConnectionEventRepository, HealthCheckRunner, MonitoringSettingsRepository
 from app.services.speed_test_config import (
     CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE,
     estimate_speed_tests_per_minute,
@@ -27,6 +28,7 @@ class MonitoringAdminService:
         self._runner = HealthCheckRunner(session)
         self._settings_repo = MonitoringSettingsRepository(session)
         self._results_repo = CheckResultRepository(session)
+        self._events_repo = ConnectionEventRepository(session)
 
     def get_settings_response(self) -> MonitoringSettingsResponse:
         settings = self._settings_repo.get()
@@ -73,6 +75,14 @@ class MonitoringAdminService:
 
     def run_manual_check(self, component_id: UUID) -> CheckResult:
         component = self._component_service.get(component_id)
+        if (
+            component.check_type in PERSISTENT_VPN_CHECK_TYPES
+            and component.connection_mode == ConnectionMode.PERSISTENT.value
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Manual checks are not supported for persistent OpenVPN services; use the connection log instead.",
+            )
         result = self._runner.run_check(component)
         self._session.commit()
         return result
@@ -91,9 +101,25 @@ class MonitoringAdminService:
             limit=params.limit,
         )
 
+    def list_connection_events(self, component_id: UUID, params: PaginationParams) -> PaginatedResult[ConnectionEvent]:
+        self._component_service.get(component_id)
+        items, total = self._events_repo.list_for_component_paginated(
+            component_id,
+            offset=params.offset,
+            limit=params.limit,
+        )
+        return PaginatedResult(
+            items=items,
+            total=total,
+            offset=params.offset,
+            limit=params.limit,
+        )
+
     def purge_check_history(self, component_id: UUID, *, keep: int = 0) -> PurgeCheckHistoryResponse:
         self._component_service.get(component_id)
         deleted, remaining = self._results_repo.purge_for_component(component_id, keep=keep)
+        if keep == 0:
+            self._events_repo.purge_for_component(component_id)
         self._session.commit()
         return PurgeCheckHistoryResponse(deleted_count=deleted, remaining_count=remaining)
 
