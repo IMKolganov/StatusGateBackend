@@ -55,6 +55,10 @@ services:
       - NET_ADMIN
       # Required for persistent OpenVPN: ip netns add mounts /run/netns
       - SYS_ADMIN
+    # Docker's default AppArmor profile denies mount; without this, ip netns fails
+    # with "mount --make-shared /run/netns failed: Permission denied".
+    security_opt:
+      - apparmor:unconfined
     devices:
       - /dev/net/tun:/dev/net/tun
     command: sh -c "alembic upgrade head && python -m app.worker"

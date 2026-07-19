@@ -110,7 +110,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                 except NetnsPermissionError:
                     logger.error(
                         "Persistent OpenVPN worker for component %s cannot create netns; "
-                        "add SYS_ADMIN (or privileged) to the worker container and recreate it. "
+                        "worker needs SYS_ADMIN and security_opt apparmor:unconfined, then recreate. "
                         "Retrying in %ss.",
                         self._component_id,
                         _NETNS_PERMISSION_BACKOFF_SECONDS,
