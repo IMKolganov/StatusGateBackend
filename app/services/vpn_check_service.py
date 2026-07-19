@@ -27,13 +27,19 @@ from app.services.speed_test_config import (
     pick_display_speed_test,
     try_acquire_cloudflare_speed_test_slot,
 )
-from app.services.vpn_netns import delete_netns, ensure_netns, netns_name_for_component, netns_popen, run_ip_command
+from app.services.vpn_netns import (
+    delete_netns,
+    ensure_netns,
+    move_iface_to_netns,
+    netns_name_for_component,
+    run_ip_command,
+    tun_name_for_component,
+)
 from app.services.xray_config import parse_xray_config_text
 
 _vpn_check_lock = threading.Lock()
 
 DEFAULT_PROBE_URL = "https://ifconfig.me/ip"
-PERSISTENT_TUN_DEVICE = "tun0"
 RECONNECT_DELAY_SECONDS = 5
 
 
@@ -189,6 +195,7 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
 def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSessionHandle | None:
     config_text = _config_text(component)
     netns = netns_name_for_component(component.id)
+    tun_dev = tun_name_for_component(component.id)
     ensure_netns(netns)
 
     tmpdir = tempfile.mkdtemp(prefix="sg-openvpn-persist-")
@@ -198,14 +205,18 @@ def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSe
     config_path.write_text(config_text, encoding="utf-8")
 
     connect_started = time.perf_counter()
-    proc = netns_popen(
-        netns,
+    # Connect in the container/default netns (has uplink to the VPN server).
+    # `--route-noexec` keeps OpenVPN from hijacking the container default route
+    # while multiple persistent tunnels run. After the TUN is up we move it into
+    # the per-component netns and install a default route there for probes.
+    proc = subprocess.Popen(
         [
             "openvpn",
             "--config",
             str(config_path),
             "--dev",
-            PERSISTENT_TUN_DEVICE,
+            tun_dev,
+            "--route-noexec",
             "--log",
             str(log_path),
             "--writepid",
@@ -222,11 +233,27 @@ def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSe
     )
 
     timeout = component.timeout_seconds
-    iface = _wait_for_tun_interface(timeout=min(timeout, 120), netns=netns, device=PERSISTENT_TUN_DEVICE)
+    iface = _wait_for_tun_interface(timeout=min(timeout, 120), device=tun_dev)
     connect_time_ms = int((time.perf_counter() - connect_started) * 1000)
     if iface is None:
         _terminate_process(proc, pid_path)
         _cleanup_persistent_tmpdir(tmpdir)
+        delete_netns(netns)
+        return None
+
+    gateway = _tun_peer_gateway(iface)
+    try:
+        move_iface_to_netns(iface, netns, gateway=gateway)
+    except subprocess.CalledProcessError:
+        _terminate_process(proc, pid_path)
+        _cleanup_persistent_tmpdir(tmpdir)
+        delete_netns(netns)
+        return None
+
+    if not _interface_is_up(iface, netns=netns):
+        _terminate_process(proc, pid_path)
+        _cleanup_persistent_tmpdir(tmpdir)
+        delete_netns(netns)
         return None
 
     return OpenVpnSessionHandle(
@@ -498,6 +525,39 @@ def _interface_is_up(iface: str, *, netns: str | None = None) -> bool:
         if addr_info.get("family") == "inet" and addr_info.get("local"):
             return True
     return False
+
+
+def _tun_peer_gateway(iface: str, *, netns: str | None = None) -> str | None:
+    try:
+        if netns:
+            output = run_ip_command(["-json", "addr", "show", "dev", iface], netns=netns)
+        else:
+            output = subprocess.check_output(["ip", "-json", "addr", "show", "dev", iface], text=True, timeout=5)
+        rows = json.loads(output)
+    except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
+        return None
+
+    for row in rows:
+        for addr_info in row.get("addr_info") or []:
+            if addr_info.get("family") != "inet":
+                continue
+            peer = addr_info.get("peer")
+            if isinstance(peer, str) and peer:
+                return peer.split("/")[0]
+    try:
+        if netns:
+            route_output = run_ip_command(["-json", "route", "show", "dev", iface], netns=netns)
+        else:
+            route_output = subprocess.check_output(
+                ["ip", "-json", "route", "show", "dev", iface], text=True, timeout=5
+            )
+        for route in json.loads(route_output):
+            gateway = route.get("gateway")
+            if isinstance(gateway, str) and gateway:
+                return gateway
+    except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
+        pass
+    return None
 
 
 def _collect_network_details(iface: str, *, netns: str | None = None) -> dict[str, Any]:

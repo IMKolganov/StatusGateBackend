@@ -20,7 +20,7 @@ from app.schemas.network import VpnCheckConfig
 from app.services import vpn_check_service as vpn
 from app.services.monitoring_service import HealthCheckRunner
 from app.services.speed_test_config import SpeedTestRunContext
-from app.services.vpn_netns import ensure_netns, list_netns_names, netns_name_for_component
+from app.services.vpn_netns import ensure_netns, list_netns_names, netns_name_for_component, tun_name_for_component
 from app.services.vpn_session_supervisor import (
     VpnSessionSupervisor,
     _PersistentComponentSnapshot,
@@ -156,6 +156,11 @@ class TestVpnNetnsHelpers:
         component_id = uuid4()
         assert netns_name_for_component(component_id) == f"sg-{str(component_id).split('-')[0]}"
 
+    def test_tun_name_for_component(self) -> None:
+        component_id = uuid4()
+        assert tun_name_for_component(component_id) == f"tun-{str(component_id).split('-')[0]}"
+        assert len(tun_name_for_component(component_id)) <= 15
+
     def test_list_netns_names_parses_plain_output(self) -> None:
         with patch("app.services.vpn_netns.subprocess.check_output", side_effect=[FileNotFoundError, "sg-abc (id: 0)\n"]):
             assert list_netns_names() == {"sg-abc"}
@@ -167,8 +172,9 @@ class TestVpnNetnsHelpers:
             calls.append(cmd)
 
         with patch("app.services.vpn_netns.list_netns_names", return_value=set()):
-            with patch("app.services.vpn_netns.subprocess.check_call", side_effect=fake_check_call):
-                ensure_netns("sg-test")
+            with patch("app.services.vpn_netns.ensure_netns_resolv"):
+                with patch("app.services.vpn_netns.subprocess.check_call", side_effect=fake_check_call):
+                    ensure_netns("sg-test")
         assert calls[0] == ["ip", "netns", "add", "sg-test"]
         assert calls[1] == ["ip", "netns", "exec", "sg-test", "ip", "link", "set", "lo", "up"]
 
@@ -188,6 +194,28 @@ class TestVpnNetnsHelpers:
             ):
                 with pytest.raises(NetnsPermissionError, match="apparmor:unconfined"):
                     ensure_netns("sg-test")
+
+    def test_start_openvpn_persistent_uses_host_netns_then_moves_tun(self) -> None:
+        component = _vpn_component()
+        short = str(component.id).split("-")[0]
+        popen = MagicMock()
+        popen.poll.return_value = None
+        with patch("app.services.vpn_check_service.ensure_netns") as ensure:
+            with patch("app.services.vpn_check_service.subprocess.Popen", return_value=popen) as popen_ctor:
+                with patch.object(vpn, "_wait_for_tun_interface", return_value=f"tun-{short}"):
+                    with patch.object(vpn, "_tun_peer_gateway", return_value="10.8.0.1"):
+                        with patch("app.services.vpn_check_service.move_iface_to_netns") as move:
+                            with patch.object(vpn, "_interface_is_up", return_value=True):
+                                handle = vpn.start_openvpn_persistent_session(component)
+        assert handle is not None
+        assert handle.iface == f"tun-{short}"
+        ensure.assert_called_once()
+        argv = popen_ctor.call_args.args[0]
+        assert argv[0] == "openvpn"
+        assert "--route-noexec" in argv
+        assert "--dev" in argv and f"tun-{short}" in argv
+        assert "--netns" not in argv
+        move.assert_called_once_with(f"tun-{short}", f"sg-{short}", gateway="10.8.0.1")
 
 
 class TestPersistentProbeHelpers:
