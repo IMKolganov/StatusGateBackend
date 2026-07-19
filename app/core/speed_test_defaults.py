@@ -5,8 +5,11 @@
 DEFAULT_SPEED_TEST_URL_TEMPLATE = "https://speed.cloudflare.com/__down?bytes={bytes}"
 DEFAULT_SPEED_TEST_INTERVAL_SECONDS = 3600
 
-# Minimum gap between Cloudflare speed test GETs from this worker (all VPN services share one egress IP).
-CLOUDFLARE_SPEED_TEST_MIN_GAP_SECONDS = 60
+# Minimum gap between live speed tests from this worker (all VPN services share one process).
+# Cloudflare and custom URLs both use this so checks are staggered, not burst together.
+SPEED_TEST_MIN_GAP_SECONDS = 60
+# Back-compat alias used by guidance copy / older imports.
+CLOUDFLARE_SPEED_TEST_MIN_GAP_SECONDS = SPEED_TEST_MIN_GAP_SECONDS
 
 # After HTTP 429, wait at least this long before retrying (per service).
 SPEED_TEST_RATE_LIMIT_BACKOFF_SECONDS = 3600

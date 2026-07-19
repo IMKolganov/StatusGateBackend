@@ -274,7 +274,7 @@ class TestEnrichNetworkMetricsSpeedTest:
             last_successful_speed_test=last_success,
         )
         with (
-            patch("app.services.vpn_check_service.try_acquire_cloudflare_speed_test_slot", return_value=False),
+            patch("app.services.vpn_check_service.try_acquire_speed_test_slot", return_value=False),
             patch("app.services.vpn_check_service._measure_download_speed") as measure,
         ):
             vpn._enrich_network_metrics(
@@ -307,8 +307,10 @@ class TestEnrichNetworkMetricsSpeedTest:
                 speed_test_context=context,
             )
             measure.assert_called_once()
-        assert network["speed_test"] == measured
-        assert network["speed_test_last_success"] == measured
+        assert network["speed_test"]["ok"] is True
+        assert network["speed_test"]["mbps"] == 10.0
+        assert isinstance(network["speed_test"].get("measured_at"), str)
+        assert network["speed_test_last_success"] == network["speed_test"]
 
 
 class TestHealthCheckRunnerSpeedTestContext:
@@ -358,6 +360,74 @@ class TestHealthCheckRunnerSpeedTestContext:
         assert context.url_template == "https://cdn.example.com/x?b={bytes}"
         assert context.run_speed_test is True
         assert context.previous_speed_test is None
+
+    def test_run_due_checks_staggers_speed_tests_to_one_vpn(self, db_session: Session) -> None:
+        from app.models.project import Project
+
+        project = Project(name="Stagger", slug="stagger-proj", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+
+        components = []
+        for index in range(3):
+            component = MonitoredComponent(
+                project_id=project.id,
+                component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+                name=f"VPN {index}",
+                slug=f"vpn-stagger-{index}",
+                check_url="https://ifconfig.me/ip",
+                check_method="GET",
+                check_type=CheckType.OPENVPN.value,
+                check_config={"config_text": "client\ndev tun\nremote x 1194\n"},
+                expected_status_code=200,
+                timeout_seconds=60,
+                speed_test_interval_seconds=3600,
+                speed_test_enabled=True,
+                is_active=True,
+                last_checked_at=datetime.now(UTC) - timedelta(hours=2),
+            )
+            db_session.add(component)
+            components.append(component)
+        db_session.flush()
+
+        measured_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        for component in components:
+            db_session.add(
+                CheckResult(
+                    monitored_component_id=component.id,
+                    checked_at=datetime.now(UTC) - timedelta(hours=2),
+                    outcome="up",
+                    details={
+                        "network": {
+                            "speed_test": {
+                                "ok": True,
+                                "mbps": 10.0,
+                                "measured_at": measured_at,
+                            }
+                        }
+                    },
+                )
+            )
+        db_session.commit()
+
+        runner = HealthCheckRunner(db_session)
+        contexts: list[SpeedTestRunContext] = []
+
+        def fake_run_health_check(comp, *, speed_test_context=None):
+            if speed_test_context is not None:
+                contexts.append(speed_test_context)
+            return CheckResult(
+                monitored_component_id=comp.id,
+                checked_at=datetime.now(UTC),
+                outcome="up",
+                latency_ms=100,
+            )
+
+        with patch("app.services.monitoring_service.run_health_check", side_effect=fake_run_health_check):
+            runner.run_due_checks()
+
+        assert len(contexts) == 3
+        assert sum(1 for context in contexts if context.run_speed_test) == 1
 
 
 class TestSpeedTestAdvisoryService:
