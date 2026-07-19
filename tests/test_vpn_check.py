@@ -187,6 +187,35 @@ class TestVpnHelpers:
         assert summary.speed_test_showing_last_success is True
         assert summary.speed_test_error == "Speed test failed"
 
+    def test_public_network_summary_deferred_cached_exposes_measured_at(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": True,
+                    "mbps": 91.88,
+                    "bytes": 10485760,
+                    "duration_ms": 913,
+                    "cached": True,
+                    "deferred": True,
+                    "defer_reason": "stagger",
+                    "measured_at": "2026-07-20T00:10:00+00:00",
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "mbps": 91.88,
+                    "bytes": 10485760,
+                    "duration_ms": 913,
+                    "measured_at": "2026-07-20T00:10:00+00:00",
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps == 91.88
+        assert summary.speed_test_showing_last_success is True
+        assert summary.speed_test_last_success_at == "2026-07-20T00:10:00+00:00"
+        assert summary.speed_test_measured_at == "2026-07-20T00:10:00+00:00"
+
     def test_format_speed_test_error_from_httpx_message(self) -> None:
         raw = (
             "Client error '429 Too Many Requests' for url "

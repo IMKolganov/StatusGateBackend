@@ -201,8 +201,12 @@ class HealthCheckRunner:
             latest_map = self._results_repo.latest_by_component_ids([component.id])
             latest = latest_map.get(component.id)
             latest_details = latest.details if latest and isinstance(latest.details, dict) else None
-            previous_speed_test = extract_speed_test_from_details(latest_details)
-            last_successful_speed_test = extract_last_successful_speed_test(latest_details)
+            checked_at = latest.checked_at if latest else None
+            previous_speed_test = extract_speed_test_from_details(latest_details, checked_at=checked_at)
+            last_successful_speed_test = extract_last_successful_speed_test(
+                latest_details,
+                checked_at=checked_at,
+            )
             due = should_run_speed_test(component, settings, latest)
             if speed_test_allowed_ids is None:
                 run_speed = due
