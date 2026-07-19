@@ -131,8 +131,19 @@ class _PersistentOpenVpnWorker(threading.Thread):
                         handle = None
                     if self._stop.wait(_NETNS_PERMISSION_BACKOFF_SECONDS):
                         break
-                except Exception:
-                    logger.exception("Persistent OpenVPN worker failed for component %s", self._component_id)
+                except Exception as exc:
+                    connect_failures += 1
+                    backoff = min(
+                        RECONNECT_DELAY_SECONDS * (2 ** min(connect_failures - 1, 4)),
+                        _CONNECT_FAILURE_BACKOFF_CAP_SECONDS,
+                    )
+                    # Put the reason on the first line — Wazuh/Telegram often capture only that.
+                    logger.exception(
+                        "Persistent OpenVPN worker failed for component %s: %s (retry in %ss)",
+                        self._component_id,
+                        exc,
+                        backoff,
+                    )
                     if handle is not None:
                         stop_openvpn_persistent_session(handle)
                         handle = None
@@ -142,7 +153,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                             outcome=CheckOutcome.DOWN.value,
                             message="VPN session stopped after worker error",
                         )
-                    if self._stop.wait(RECONNECT_DELAY_SECONDS):
+                    if self._stop.wait(backoff):
                         break
         finally:
             if handle is not None:
