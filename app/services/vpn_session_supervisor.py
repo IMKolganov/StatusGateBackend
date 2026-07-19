@@ -28,6 +28,7 @@ from app.services.speed_test_config import (
 from app.services.vpn_check_service import (
     RECONNECT_DELAY_SECONDS,
     OpenVpnSessionHandle,
+    OpenVpnStartResult,
     is_openvpn_persistent_session_up,
     run_openvpn_persistent_probe,
     start_openvpn_persistent_session,
@@ -37,6 +38,7 @@ from app.services.vpn_netns import NetnsPermissionError
 
 # Capability / host misconfig will not heal by retrying every 5s.
 _NETNS_PERMISSION_BACKOFF_SECONDS = 60
+_CONNECT_FAILURE_BACKOFF_CAP_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
     def run(self) -> None:
         handle: OpenVpnSessionHandle | None = None
         component: MonitoredComponent | None = None
+        connect_failures = 0
         try:
             while not self._stop.is_set():
                 component = self._load_component()
@@ -85,13 +88,20 @@ class _PersistentOpenVpnWorker(threading.Thread):
                                 break
                             self._save_session_event(component, None, ConnectionEventType.RECONNECT.value)
 
-                        handle = start_openvpn_persistent_session(component)
+                        start_result = start_openvpn_persistent_session(component)
+                        handle = start_result.handle
                         if handle is None:
-                            self._save_connect_failure(component)
-                            if self._stop.wait(RECONNECT_DELAY_SECONDS):
+                            connect_failures += 1
+                            self._save_connect_failure(component, start_result)
+                            backoff = min(
+                                RECONNECT_DELAY_SECONDS * (2 ** min(connect_failures - 1, 4)),
+                                _CONNECT_FAILURE_BACKOFF_CAP_SECONDS,
+                            )
+                            if self._stop.wait(backoff):
                                 break
                             continue
 
+                        connect_failures = 0
                         self._save_session_event(component, handle, ConnectionEventType.TUNNEL_UP.value)
 
                     speed_test_context = self._build_speed_test_context(component)
@@ -267,9 +277,16 @@ class _PersistentOpenVpnWorker(threading.Thread):
 
         self._last_probe_ok = probe_ok
 
-    def _save_connect_failure(self, component: MonitoredComponent) -> None:
+    def _save_connect_failure(self, component: MonitoredComponent, start_result: OpenVpnStartResult) -> None:
         checked_at = datetime.now(UTC)
-        message = "OpenVPN tunnel did not come up in time"
+        message = start_result.error_message or "OpenVPN tunnel did not come up in time"
+        details: dict[str, Any] = {
+            "check_type": component.check_type,
+            "connection_mode": ConnectionMode.PERSISTENT.value,
+            "session_event": ConnectionEventType.CONNECT_FAILED.value,
+        }
+        if start_result.log_tail:
+            details["log_tail"] = start_result.log_tail
         result = CheckResult(
             monitored_component_id=component.id,
             checked_at=checked_at,
@@ -277,11 +294,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
             latency_ms=None,
             http_status_code=None,
             error_message=message,
-            details={
-                "check_type": component.check_type,
-                "connection_mode": ConnectionMode.PERSISTENT.value,
-                "session_event": ConnectionEventType.CONNECT_FAILED.value,
-            },
+            details=details,
         )
         self._persist_result(component, result)
         self._record_connection_event(
@@ -290,6 +303,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
             occurred_at=checked_at,
             outcome=CheckOutcome.TIMEOUT.value,
             message=message,
+            details=details,
         )
 
     def _save_session_event(

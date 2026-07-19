@@ -18,6 +18,7 @@ from app.schemas.monitoring import ConnectionEventResponse
 from app.services.connection_event_service import connection_event_label, record_connection_event
 from app.services.monitoring_service import ConnectionEventRepository
 from app.services.vpn_session_supervisor import _PersistentOpenVpnWorker
+from app.services.vpn_check_service import OpenVpnStartResult
 
 
 def _vpn_component(**overrides) -> MonitoredComponent:
@@ -300,20 +301,30 @@ class TestConnectionEventServiceDetails:
 
 class TestPersistentWorkerSessionEvents:
     def test_save_connect_failure_records_event_and_check_result(self) -> None:
+        from app.services.vpn_check_service import OpenVpnStartResult
+
         worker = _PersistentOpenVpnWorker(uuid4(), MagicMock())
         component = _vpn_component()
+        start_result = OpenVpnStartResult(
+            handle=None,
+            log_tail="AUTH_FAILED",
+            error_message="OpenVPN tunnel did not come up in time: AUTH_FAILED",
+        )
 
         with patch.object(worker, "_persist_result") as persist:
             with patch.object(worker, "_record_connection_event") as record:
-                worker._save_connect_failure(component)
+                worker._save_connect_failure(component, start_result)
 
         persist.assert_called_once()
         result = persist.call_args.args[1]
         assert result.outcome == CheckOutcome.TIMEOUT.value
         assert result.details["session_event"] == ConnectionEventType.CONNECT_FAILED.value
+        assert result.details["log_tail"] == "AUTH_FAILED"
+        assert "AUTH_FAILED" in (result.error_message or "")
 
         record.assert_called_once()
         assert record.call_args.args[1] == ConnectionEventType.CONNECT_FAILED.value
+        assert record.call_args.kwargs["details"]["log_tail"] == "AUTH_FAILED"
 
     def test_save_session_event_without_handle_records_reconnect(self) -> None:
         worker = _PersistentOpenVpnWorker(uuid4(), MagicMock())
@@ -446,7 +457,7 @@ class TestPersistentWorkerSessionEvents:
                 with patch.object(worker, "_probe_interval_seconds", return_value=60):
                     with patch(
                         "app.services.vpn_session_supervisor.start_openvpn_persistent_session",
-                        return_value=handle,
+                        return_value=OpenVpnStartResult(handle=handle),
                     ):
                         with patch(
                             "app.services.vpn_session_supervisor.is_openvpn_persistent_session_up",
@@ -780,7 +791,7 @@ class TestPersistentWorkerErrors:
         with patch.object(worker, "_load_component", return_value=component):
             with patch(
                 "app.services.vpn_session_supervisor.start_openvpn_persistent_session",
-                return_value=handle,
+                return_value=OpenVpnStartResult(handle=handle),
             ):
                 with patch(
                     "app.services.vpn_session_supervisor.is_openvpn_persistent_session_up",
