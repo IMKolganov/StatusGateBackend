@@ -64,13 +64,104 @@ class TestSpeedTestConfig:
     def test_should_run_speed_test_respects_interval(self) -> None:
         component = _vpn_component(speed_test_interval_seconds=3600)
         settings = _settings(default_speed_test_interval_seconds=3600)
+        measured_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         latest = CheckResult(
             monitored_component_id=component.id,
-            checked_at=datetime.now(UTC) - timedelta(minutes=10),
+            checked_at=datetime.now(UTC) - timedelta(seconds=30),
             outcome="up",
-            details={"network": {"speed_test": {"ok": True, "bytes": 1024}}},
+            details={"network": {"speed_test": {"ok": True, "bytes": 1024, "measured_at": measured_at}}},
         )
         assert should_run_speed_test(component, settings, latest) is False
+
+    def test_should_run_speed_test_uses_measured_at_not_checked_at(self) -> None:
+        component = _vpn_component(speed_test_interval_seconds=3600)
+        settings = _settings(default_speed_test_interval_seconds=3600)
+        measured_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        latest = CheckResult(
+            monitored_component_id=component.id,
+            checked_at=datetime.now(UTC) - timedelta(seconds=15),
+            outcome="up",
+            details={"network": {"speed_test": {"ok": True, "bytes": 1024, "measured_at": measured_at}}},
+        )
+        assert should_run_speed_test(component, settings, latest) is True
+
+    def test_pick_staggered_speed_test_component_ids_limits_to_one(self) -> None:
+        from app.services.speed_test_config import pick_staggered_speed_test_component_ids
+
+        settings = _settings(default_speed_test_interval_seconds=3600)
+        components = [_vpn_component(slug=f"vpn-{i}") for i in range(3)]
+        latest_by_id = {}
+        for component in components:
+            latest_by_id[component.id] = CheckResult(
+                monitored_component_id=component.id,
+                checked_at=datetime.now(UTC) - timedelta(hours=2),
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "measured_at": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+                        }
+                    }
+                },
+            )
+        allowed = pick_staggered_speed_test_component_ids(components, settings, latest_by_id, limit=1)
+        assert len(allowed) == 1
+        assert next(iter(allowed)) in {component.id for component in components}
+
+    def test_pick_staggered_speed_test_rotates_order_by_hour(self) -> None:
+        from app.services.speed_test_config import (
+            pick_staggered_speed_test_component_ids,
+            speed_test_stagger_key,
+        )
+
+        settings = _settings(default_speed_test_interval_seconds=3600)
+        components = [_vpn_component(slug=f"vpn-{i}") for i in range(4)]
+        measured_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        latest_by_id = {
+            component.id: CheckResult(
+                monitored_component_id=component.id,
+                checked_at=datetime.now(UTC) - timedelta(seconds=10),
+                outcome="up",
+                details={"network": {"speed_test": {"ok": True, "measured_at": measured_at}}},
+            )
+            for component in components
+        }
+        hour_a = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        hour_b = datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+        ids = [component.id for component in components]
+        order_a = sorted(ids, key=lambda component_id: speed_test_stagger_key(component_id, now=hour_a))
+        order_b = sorted(ids, key=lambda component_id: speed_test_stagger_key(component_id, now=hour_b))
+        assert order_a != order_b
+
+        first_a = next(
+            iter(pick_staggered_speed_test_component_ids(components, settings, latest_by_id, now=hour_a, limit=1))
+        )
+        first_b = next(
+            iter(pick_staggered_speed_test_component_ids(components, settings, latest_by_id, now=hour_b, limit=1))
+        )
+        assert first_a == order_a[0]
+        assert first_b == order_b[0]
+
+    def test_should_run_speed_test_when_previous_was_cached(self) -> None:
+        component = _vpn_component(speed_test_interval_seconds=3600)
+        settings = _settings(default_speed_test_interval_seconds=3600)
+        latest = CheckResult(
+            monitored_component_id=component.id,
+            checked_at=datetime.now(UTC) - timedelta(seconds=15),
+            outcome="up",
+            details={
+                "network": {
+                    "speed_test": {
+                        "ok": True,
+                        "mbps": 12.0,
+                        "cached": True,
+                        "measured_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+                    }
+                }
+            },
+        )
+        assert should_run_speed_test(component, settings, latest) is True
 
     def test_speed_test_rate_warning_for_many_services(self) -> None:
         settings = _settings(default_poll_interval_seconds=60, default_speed_test_interval_seconds=60)
@@ -86,18 +177,24 @@ class TestSpeedTestConfig:
         assert "{bytes}" in context.url_template
 
     def test_should_not_retry_immediately_after_rate_limit(self) -> None:
-        component = _vpn_component(speed_test_interval_seconds=0)
-        settings = _settings(default_speed_test_interval_seconds=0)
+        component = _vpn_component(speed_test_interval_seconds=60)
+        settings = _settings(default_speed_test_interval_seconds=60)
+        measured_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         latest = CheckResult(
             monitored_component_id=component.id,
-            checked_at=datetime.now(UTC) - timedelta(minutes=10),
+            checked_at=datetime.now(UTC) - timedelta(seconds=30),
             outcome="up",
             details={
                 "network": {
-                    "speed_test": {"ok": False, "error": "Speed test rate limited (HTTP 429)"},
+                    "speed_test": {
+                        "ok": False,
+                        "error": "Speed test rate limited (HTTP 429)",
+                        "measured_at": measured_at,
+                    },
                 }
             },
         )
+        # 429 backoff is 3600s even when interval is 60s.
         assert should_run_speed_test(component, settings, latest) is False
 
     def test_cloudflare_speed_test_slot_limits_burst(self) -> None:

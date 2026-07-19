@@ -18,6 +18,7 @@ from app.services.speed_test_config import (
     effective_speed_test_url_template,
     extract_last_successful_speed_test,
     extract_speed_test_from_details,
+    pick_staggered_speed_test_component_ids,
     should_run_speed_test,
 )
 
@@ -188,7 +189,12 @@ class HealthCheckRunner:
         components = list(self._session.scalars(stmt).all())
         return [component for component in components if self.is_due(component, settings, now=current)]
 
-    def run_check(self, component: MonitoredComponent) -> CheckResult:
+    def run_check(
+        self,
+        component: MonitoredComponent,
+        *,
+        speed_test_allowed_ids: set[UUID] | None = None,
+    ) -> CheckResult:
         settings = self.get_settings()
         speed_test_context: SpeedTestRunContext | None = None
         if component.check_type in VPN_CHECK_TYPES:
@@ -197,9 +203,14 @@ class HealthCheckRunner:
             latest_details = latest.details if latest and isinstance(latest.details, dict) else None
             previous_speed_test = extract_speed_test_from_details(latest_details)
             last_successful_speed_test = extract_last_successful_speed_test(latest_details)
+            due = should_run_speed_test(component, settings, latest)
+            if speed_test_allowed_ids is None:
+                run_speed = due
+            else:
+                run_speed = due and component.id in speed_test_allowed_ids
             speed_test_context = SpeedTestRunContext(
                 url_template=effective_speed_test_url_template(component, settings),
-                run_speed_test=should_run_speed_test(component, settings, latest),
+                run_speed_test=run_speed,
                 previous_speed_test=previous_speed_test,
                 last_successful_speed_test=last_successful_speed_test,
             )
@@ -212,7 +223,11 @@ class HealthCheckRunner:
         results: list[CheckResult] = []
         due = self.list_due_components()
         due.sort(key=lambda component: (component.check_type not in VPN_CHECK_TYPES, str(component.id)))
+        settings = self.get_settings()
+        vpn_due = [component for component in due if component.check_type in VPN_CHECK_TYPES]
+        latest_map = self._results_repo.latest_by_component_ids([component.id for component in vpn_due])
+        allowed_speed_ids = pick_staggered_speed_test_component_ids(vpn_due, settings, latest_map)
         for component in due:
-            results.append(self.run_check(component))
+            results.append(self.run_check(component, speed_test_allowed_ids=allowed_speed_ids))
         self._session.commit()
         return results
