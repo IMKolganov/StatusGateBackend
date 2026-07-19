@@ -260,6 +260,8 @@ class TestEnrichNetworkMetricsSpeedTest:
             measure.assert_not_called()
         assert network["speed_test"]["mbps"] == 42.0
         assert network["speed_test"]["cached"] is True
+        assert network["speed_test"]["deferred"] is True
+        assert network["speed_test"]["defer_reason"] == "stagger"
 
     def test_cloudflare_throttle_reuses_last_success(self) -> None:
         from app.services.speed_test_config import reset_cloudflare_speed_test_slot_for_tests
@@ -289,6 +291,36 @@ class TestEnrichNetworkMetricsSpeedTest:
         assert network["speed_test"]["mbps"] == 25.0
         assert network["speed_test"]["stale"] is True
         assert network["speed_test"]["throttled"] is True
+
+    def test_deferred_without_history_still_records_placeholder(self) -> None:
+        network: dict = {}
+        context = SpeedTestRunContext(
+            url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE,
+            run_speed_test=False,
+            previous_speed_test=None,
+            last_successful_speed_test=None,
+        )
+        with patch("app.services.vpn_check_service._measure_download_speed") as measure:
+            vpn._enrich_network_metrics(
+                network,
+                gateway=None,
+                proxy_url=None,
+                iface=None,
+                timeout=30,
+                speed_test_context=context,
+            )
+            measure.assert_not_called()
+        assert network["speed_test"]["ok"] is False
+        assert network["speed_test"]["deferred"] is True
+        assert network["speed_test"]["defer_reason"] == "stagger"
+        assert "waiting for a free slot" in network["speed_test"]["error"]
+
+        summary = vpn.public_network_summary({"network": network})
+        assert summary is not None
+        assert summary.download_mbps is None
+        assert summary.speed_test_ok is False
+        assert summary.speed_test_error is not None
+        assert "deferred" in summary.speed_test_error.lower() or "waiting" in summary.speed_test_error.lower()
 
     def test_runs_download_when_enabled(self) -> None:
         from app.services.speed_test_config import reset_cloudflare_speed_test_slot_for_tests
