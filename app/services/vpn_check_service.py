@@ -56,6 +56,13 @@ class OpenVpnSessionHandle:
     connect_time_ms: int
 
 
+@dataclass
+class OpenVpnStartResult:
+    handle: OpenVpnSessionHandle | None
+    log_tail: str | None = None
+    error_message: str | None = None
+
+
 def _speed_test_bytes_for(component: MonitoredComponent) -> int:
     return component.speed_test_bytes or DEFAULT_SPEED_TEST_BYTES
 
@@ -192,7 +199,7 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
             _terminate_process(proc, pid_path)
 
 
-def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSessionHandle | None:
+def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnStartResult:
     config_text = _config_text(component)
     netns = netns_name_for_component(component.id)
     tun_dev = tun_name_for_component(component.id)
@@ -217,6 +224,9 @@ def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSe
             "--dev",
             tun_dev,
             "--route-noexec",
+            "--pull-filter",
+            "ignore",
+            "block-outside-dns",
             "--log",
             str(log_path),
             "--writepid",
@@ -232,40 +242,63 @@ def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSe
         start_new_session=True,
     )
 
-    timeout = component.timeout_seconds
-    iface = _wait_for_tun_interface(timeout=min(timeout, 120), device=tun_dev)
+    # Persistent handshakes often need longer than short HTTP-style timeouts.
+    connect_timeout = min(max(component.timeout_seconds, 60), 120)
+    iface = _wait_for_tun_interface(timeout=connect_timeout, device=tun_dev)
     connect_time_ms = int((time.perf_counter() - connect_started) * 1000)
     if iface is None:
+        log_tail = _read_tail(log_path)
+        hint = _vpn_log_hint(log_tail)
+        message = "OpenVPN tunnel did not come up in time"
+        if hint:
+            message = f"{message}: {hint}"
         _terminate_process(proc, pid_path)
         _cleanup_persistent_tmpdir(tmpdir)
         delete_netns(netns)
-        return None
+        return OpenVpnStartResult(handle=None, log_tail=log_tail, error_message=message)
 
-    gateway = _tun_peer_gateway(iface)
+    addresses = _tun_ipv4_addresses(iface)
+    log_tail = _read_tail(log_path)
+    gateway = _resolve_tun_gateway(iface, log_tail=log_tail)
     try:
-        move_iface_to_netns(iface, netns, gateway=gateway)
-    except subprocess.CalledProcessError:
+        move_iface_to_netns(iface, netns, addresses=addresses, gateway=gateway)
+    except subprocess.CalledProcessError as exc:
+        log_tail = _read_tail(log_path)
+        message = f"Failed to move TUN into netns {netns!r}: {exc}"
         _terminate_process(proc, pid_path)
         _cleanup_persistent_tmpdir(tmpdir)
         delete_netns(netns)
-        return None
+        return OpenVpnStartResult(handle=None, log_tail=log_tail, error_message=message)
 
-    if not _interface_is_up(iface, netns=netns):
+    # Brief settle: address restore / link state can lag one poll.
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        if _interface_is_up(iface, netns=netns):
+            break
+        time.sleep(0.2)
+    else:
+        log_tail = _read_tail(log_path)
+        message = (
+            f"TUN {iface} was not up after moving into netns {netns} "
+            f"(addresses={addresses!r}, gateway={gateway!r})"
+        )
         _terminate_process(proc, pid_path)
         _cleanup_persistent_tmpdir(tmpdir)
         delete_netns(netns)
-        return None
+        return OpenVpnStartResult(handle=None, log_tail=log_tail, error_message=message)
 
-    return OpenVpnSessionHandle(
-        component_id=component.id,
-        netns=netns,
-        proc=proc,
-        iface=iface,
-        tmpdir=tmpdir,
-        config_path=config_path,
-        log_path=log_path,
-        pid_path=pid_path,
-        connect_time_ms=connect_time_ms,
+    return OpenVpnStartResult(
+        handle=OpenVpnSessionHandle(
+            component_id=component.id,
+            netns=netns,
+            proc=proc,
+            iface=iface,
+            tmpdir=tmpdir,
+            config_path=config_path,
+            log_path=log_path,
+            pid_path=pid_path,
+            connect_time_ms=connect_time_ms,
+        )
     )
 
 
@@ -527,6 +560,28 @@ def _interface_is_up(iface: str, *, netns: str | None = None) -> bool:
     return False
 
 
+def _tun_ipv4_addresses(iface: str, *, netns: str | None = None) -> list[tuple[str, int]]:
+    try:
+        if netns:
+            output = run_ip_command(["-json", "addr", "show", "dev", iface], netns=netns)
+        else:
+            output = subprocess.check_output(["ip", "-json", "addr", "show", "dev", iface], text=True, timeout=5)
+        rows = json.loads(output)
+    except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
+        return []
+
+    addresses: list[tuple[str, int]] = []
+    for row in rows:
+        for addr_info in row.get("addr_info") or []:
+            if addr_info.get("family") != "inet":
+                continue
+            local = addr_info.get("local")
+            prefixlen = addr_info.get("prefixlen")
+            if isinstance(local, str) and isinstance(prefixlen, int):
+                addresses.append((local, prefixlen))
+    return addresses
+
+
 def _tun_peer_gateway(iface: str, *, netns: str | None = None) -> str | None:
     try:
         if netns:
@@ -558,6 +613,31 @@ def _tun_peer_gateway(iface: str, *, netns: str | None = None) -> str | None:
     except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
         pass
     return None
+
+
+def _gateway_from_openvpn_log(log_tail: str | None) -> str | None:
+    if not log_tail:
+        return None
+    # PUSH_REPLY,...route-gateway 10.51.15.1,... or "OPTIONS IMPORT" lines
+    match = re.search(r"route-gateway\s+(\d+\.\d+\.\d+\.\d+)", log_tail)
+    if match:
+        return match.group(1)
+    match = re.search(r"net_addr_v4_add:\s+(\d+\.\d+\.\d+\.\d+)/(\d+)\s+dev", log_tail)
+    if match:
+        # Subnet topology often uses .1 as gateway; derive from local /24+.
+        local = match.group(1)
+        prefix = int(match.group(2))
+        if prefix >= 24:
+            parts = local.split(".")
+            parts[3] = "1"
+            candidate = ".".join(parts)
+            if candidate != local:
+                return candidate
+    return None
+
+
+def _resolve_tun_gateway(iface: str, *, log_tail: str | None = None, netns: str | None = None) -> str | None:
+    return _tun_peer_gateway(iface, netns=netns) or _gateway_from_openvpn_log(log_tail)
 
 
 def _collect_network_details(iface: str, *, netns: str | None = None) -> dict[str, Any]:

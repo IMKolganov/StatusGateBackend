@@ -79,10 +79,35 @@ def delete_netns(name: str) -> None:
         return
 
 
-def move_iface_to_netns(iface: str, netns: str, *, gateway: str | None = None) -> None:
-    """Move a TUN from the default netns into an isolated netns and restore default route."""
+def move_iface_to_netns(
+    iface: str,
+    netns: str,
+    *,
+    addresses: list[tuple[str, int]] | None = None,
+    gateway: str | None = None,
+) -> None:
+    """Move a TUN into an isolated netns and restore addressing/routes.
+
+    Moving a device can drop addresses (especially with subnet topology). We
+    re-apply captured IPv4 addresses and install a default route for probes.
+    """
     subprocess.check_call(["ip", "link", "set", "dev", iface, "netns", netns])
     subprocess.check_call(["ip", "netns", "exec", netns, "ip", "link", "set", iface, "up"])
+    for local, prefixlen in addresses or []:
+        subprocess.check_call(
+            [
+                "ip",
+                "netns",
+                "exec",
+                netns,
+                "ip",
+                "addr",
+                "replace",
+                f"{local}/{prefixlen}",
+                "dev",
+                iface,
+            ]
+        )
     if gateway:
         subprocess.check_call(
             ["ip", "netns", "exec", netns, "ip", "route", "replace", "default", "via", gateway, "dev", iface]
