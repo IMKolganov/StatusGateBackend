@@ -40,8 +40,8 @@ def ensure_netns(name: str) -> None:
     except subprocess.CalledProcessError as exc:
         raise NetnsPermissionError(
             f"Failed to create network namespace {name!r} (exit {exc.returncode}). "
-            "Persistent OpenVPN needs container capability SYS_ADMIN "
-            "(or privileged: true) so `ip netns add` can mount /run/netns. "
+            "Persistent OpenVPN needs SYS_ADMIN plus security_opt apparmor:unconfined "
+            "(Docker's default AppArmor denies mount used by `ip netns add`). "
             "Ephemeral OpenVPN checks only need NET_ADMIN + /dev/net/tun."
         ) from exc
     subprocess.check_call(["ip", "netns", "exec", name, "ip", "link", "set", "lo", "up"])

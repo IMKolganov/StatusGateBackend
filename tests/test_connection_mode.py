@@ -186,7 +186,7 @@ class TestVpnNetnsHelpers:
                 "app.services.vpn_netns.subprocess.check_call",
                 side_effect=subprocess.CalledProcessError(1, ["ip", "netns", "add", "sg-test"]),
             ):
-                with pytest.raises(NetnsPermissionError, match="SYS_ADMIN"):
+                with pytest.raises(NetnsPermissionError, match="apparmor:unconfined"):
                     ensure_netns("sg-test")
 
 
