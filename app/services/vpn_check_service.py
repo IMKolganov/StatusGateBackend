@@ -742,6 +742,16 @@ def _enrich_network_metrics(
             network["speed_test_last_success"] = speed
         elif speed_test_context.last_successful_speed_test:
             network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+    else:
+        network["speed_test"] = stamp_speed_test_measured_at(
+            {
+                "ok": False,
+                "url": url,
+                "error": "Speed test failed",
+            }
+        )
+        if speed_test_context.last_successful_speed_test:
+            network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
 
     if iface and not network.get("mtu"):
         try:
@@ -766,22 +776,45 @@ def _apply_cached_speed_test(
         speed_test_context.previous_speed_test,
         speed_test_context.last_successful_speed_test,
     )
+    last_success = speed_test_context.last_successful_speed_test
+    defer_reason = "slot" if throttled else "stagger"
     if displayed:
         cached = dict(displayed)
         cached["cached"] = True
+        cached["deferred"] = True
+        cached["defer_reason"] = defer_reason
         if throttled:
             cached["throttled"] = True
+        # Keep a usable timestamp even when the displayed row is a legacy success.
+        if not isinstance(cached.get("measured_at"), str) and isinstance(last_success, dict):
+            success_measured_at = last_success.get("measured_at")
+            if isinstance(success_measured_at, str) and success_measured_at.strip():
+                cached["measured_at"] = success_measured_at
         network["speed_test"] = cached
-        if speed_test_context.last_successful_speed_test:
-            network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+        if last_success:
+            network["speed_test_last_success"] = last_success
+        elif cached.get("ok") is True:
+            network["speed_test_last_success"] = {
+                key: value
+                for key, value in cached.items()
+                if key not in {"cached", "deferred", "throttled", "defer_reason", "stale"}
+            }
         return
 
+    # Always leave a visible placeholder — otherwise deferred VPNs with no history
+    # disappear from the UI with no Download speed row at all.
+    network["speed_test"] = {
+        "ok": False,
+        "error": (
+            "Speed test deferred (shared rate limit — retry on next interval)"
+            if throttled
+            else "Speed test deferred (waiting for a free slot among VPN services)"
+        ),
+        "deferred": True,
+        "defer_reason": defer_reason,
+    }
     if throttled:
-        network["speed_test"] = {
-            "ok": False,
-            "error": "Speed test deferred (Cloudflare throttle — retry on next interval)",
-            "deferred": True,
-        }
+        network["speed_test"]["throttled"] = True
 
 
 def _ping_host(host: str, *, count: int = 4, timeout: float = 5, netns: str | None = None) -> dict[str, Any] | None:
@@ -1213,9 +1246,22 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
             if not last_success_at and isinstance(speed_test.get("measured_at"), str):
                 last_success_at = speed_test.get("measured_at")
         if speed_test.get("cached") and speed_test.get("ok") is True:
-            showing_last_success = showing_last_success or bool(speed_test.get("stale") or speed_test.get("throttled"))
+            showing_last_success = showing_last_success or bool(
+                speed_test.get("stale")
+                or speed_test.get("throttled")
+                or speed_test.get("deferred")
+            )
+            if not last_success_at and isinstance(measured_at, str):
+                last_success_at = measured_at
 
     if showing_last_success and not last_success_at and isinstance(measured_at, str):
+        last_success_at = measured_at
+    if (
+        speed_test.get("ok") is True
+        and not last_success_at
+        and isinstance(measured_at, str)
+        and not speed_test.get("cached")
+    ):
         last_success_at = measured_at
 
     summary = NetworkSummary(

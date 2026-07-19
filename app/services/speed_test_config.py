@@ -93,17 +93,52 @@ def uses_default_cloudflare_template(component: MonitoredComponent, settings: Mo
     return is_cloudflare_speed_test_template(template)
 
 
-def extract_speed_test_from_details(details: dict[str, Any] | None) -> dict[str, Any] | None:
+def _is_live_speed_test_row(speed_test: dict[str, Any]) -> bool:
+    return not bool(
+        speed_test.get("cached")
+        or speed_test.get("deferred")
+        or speed_test.get("throttled")
+        or speed_test.get("stale")
+    )
+
+
+def hydrate_speed_test_measured_at(
+    speed_test: dict[str, Any] | None,
+    *,
+    checked_at: datetime | None,
+) -> dict[str, Any] | None:
+    """Backfill measured_at for legacy live rows that predate the timestamp field."""
+    if not speed_test:
+        return None
+    if speed_test.get("measured_at") or not checked_at:
+        return speed_test
+    if speed_test.get("ok") is not True or not _is_live_speed_test_row(speed_test):
+        return speed_test
+    when = checked_at if checked_at.tzinfo is not None else checked_at.replace(tzinfo=UTC)
+    return stamp_speed_test_measured_at(speed_test, when=when)
+
+
+def extract_speed_test_from_details(
+    details: dict[str, Any] | None,
+    *,
+    checked_at: datetime | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(details, dict):
         return None
     network = details.get("network")
     if not isinstance(network, dict):
         return None
     speed_test = network.get("speed_test")
-    return speed_test if isinstance(speed_test, dict) else None
+    if not isinstance(speed_test, dict):
+        return None
+    return hydrate_speed_test_measured_at(speed_test, checked_at=checked_at)
 
 
-def extract_last_successful_speed_test(details: dict[str, Any] | None) -> dict[str, Any] | None:
+def extract_last_successful_speed_test(
+    details: dict[str, Any] | None,
+    *,
+    checked_at: datetime | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(details, dict):
         return None
     network = details.get("network")
@@ -111,10 +146,10 @@ def extract_last_successful_speed_test(details: dict[str, Any] | None) -> dict[s
         return None
     last_success = network.get("speed_test_last_success")
     if isinstance(last_success, dict) and last_success.get("ok") is True:
-        return last_success
+        return hydrate_speed_test_measured_at(last_success, checked_at=checked_at)
     speed_test = network.get("speed_test")
     if isinstance(speed_test, dict) and speed_test.get("ok") is True:
-        return speed_test
+        return hydrate_speed_test_measured_at(speed_test, checked_at=checked_at)
     return None
 
 

@@ -163,6 +163,22 @@ class TestSpeedTestConfig:
         )
         assert should_run_speed_test(component, settings, latest) is True
 
+    def test_hydrate_speed_test_measured_at_for_legacy_live_rows(self) -> None:
+        from app.services.speed_test_config import extract_speed_test_from_details
+
+        checked_at = datetime(2026, 7, 20, 0, 10, tzinfo=UTC)
+        details = {"network": {"speed_test": {"ok": True, "mbps": 91.88, "bytes": 10485760}}}
+        hydrated = extract_speed_test_from_details(details, checked_at=checked_at)
+        assert hydrated is not None
+        assert hydrated["measured_at"] == checked_at.isoformat()
+
+        cached = extract_speed_test_from_details(
+            {"network": {"speed_test": {"ok": True, "mbps": 10.0, "cached": True}}},
+            checked_at=checked_at,
+        )
+        assert cached is not None
+        assert "measured_at" not in cached
+
     def test_speed_test_rate_warning_for_many_services(self) -> None:
         settings = _settings(default_poll_interval_seconds=60, default_speed_test_interval_seconds=60)
         components = [_vpn_component(slug=f"vpn-{index}", speed_test_interval_seconds=60) for index in range(12)]
