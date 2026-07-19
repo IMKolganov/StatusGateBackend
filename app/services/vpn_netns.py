@@ -5,6 +5,10 @@ from typing import Any
 from uuid import UUID
 
 
+class NetnsPermissionError(RuntimeError):
+    """Raised when the container cannot create network namespaces."""
+
+
 def netns_name_for_component(component_id: UUID) -> str:
     return f"sg-{str(component_id).split('-')[0]}"
 
@@ -31,7 +35,15 @@ def list_netns_names() -> set[str]:
 def ensure_netns(name: str) -> None:
     if name in list_netns_names():
         return
-    subprocess.check_call(["ip", "netns", "add", name])
+    try:
+        subprocess.check_call(["ip", "netns", "add", name])
+    except subprocess.CalledProcessError as exc:
+        raise NetnsPermissionError(
+            f"Failed to create network namespace {name!r} (exit {exc.returncode}). "
+            "Persistent OpenVPN needs container capability SYS_ADMIN "
+            "(or privileged: true) so `ip netns add` can mount /run/netns. "
+            "Ephemeral OpenVPN checks only need NET_ADMIN + /dev/net/tun."
+        ) from exc
     subprocess.check_call(["ip", "netns", "exec", name, "ip", "link", "set", "lo", "up"])
 
 
