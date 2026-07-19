@@ -203,20 +203,31 @@ class TestVpnNetnsHelpers:
         with patch("app.services.vpn_check_service.ensure_netns") as ensure:
             with patch("app.services.vpn_check_service.subprocess.Popen", return_value=popen) as popen_ctor:
                 with patch.object(vpn, "_wait_for_tun_interface", return_value=f"tun-{short}"):
-                    with patch.object(vpn, "_tun_peer_gateway", return_value="10.8.0.1"):
-                        with patch("app.services.vpn_check_service.move_iface_to_netns") as move:
-                            with patch.object(vpn, "_interface_is_up", return_value=True):
-                                result = vpn.start_openvpn_persistent_session(component)
+                    with patch.object(vpn, "_tun_ipv4_addresses", return_value=[("10.51.15.5", 24)]):
+                        with patch.object(vpn, "_resolve_tun_gateway", return_value="10.51.15.1"):
+                            with patch("app.services.vpn_check_service.move_iface_to_netns") as move:
+                                with patch.object(vpn, "_interface_is_up", return_value=True):
+                                    with patch.object(vpn, "_read_tail", return_value="route-gateway 10.51.15.1"):
+                                        result = vpn.start_openvpn_persistent_session(component)
         assert result.handle is not None
         assert result.handle.iface == f"tun-{short}"
         ensure.assert_called_once()
         argv = popen_ctor.call_args.args[0]
         assert argv[0] == "openvpn"
         assert "--route-noexec" in argv
+        assert "--pull-filter" in argv
         assert "--dev" in argv and f"tun-{short}" in argv
         assert "--netns" not in argv
-        move.assert_called_once_with(f"tun-{short}", f"sg-{short}", gateway="10.8.0.1")
+        move.assert_called_once_with(
+            f"tun-{short}",
+            f"sg-{short}",
+            addresses=[("10.51.15.5", 24)],
+            gateway="10.51.15.1",
+        )
 
+    def test_gateway_from_openvpn_log_parses_route_gateway(self) -> None:
+        log = "PUSH_REPLY,route-gateway 10.51.15.1,topology subnet,ifconfig 10.51.15.5 255.255.255.0"
+        assert vpn._gateway_from_openvpn_log(log) == "10.51.15.1"
 
 class TestPersistentProbeHelpers:
     def test_probe_endpoint_via_curl_success(self) -> None:
