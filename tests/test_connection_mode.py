@@ -206,9 +206,9 @@ class TestVpnNetnsHelpers:
                     with patch.object(vpn, "_tun_peer_gateway", return_value="10.8.0.1"):
                         with patch("app.services.vpn_check_service.move_iface_to_netns") as move:
                             with patch.object(vpn, "_interface_is_up", return_value=True):
-                                handle = vpn.start_openvpn_persistent_session(component)
-        assert handle is not None
-        assert handle.iface == f"tun-{short}"
+                                result = vpn.start_openvpn_persistent_session(component)
+        assert result.handle is not None
+        assert result.handle.iface == f"tun-{short}"
         ensure.assert_called_once()
         argv = popen_ctor.call_args.args[0]
         assert argv[0] == "openvpn"

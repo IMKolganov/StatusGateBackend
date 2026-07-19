@@ -56,6 +56,13 @@ class OpenVpnSessionHandle:
     connect_time_ms: int
 
 
+@dataclass
+class OpenVpnStartResult:
+    handle: OpenVpnSessionHandle | None
+    log_tail: str | None = None
+    error_message: str | None = None
+
+
 def _speed_test_bytes_for(component: MonitoredComponent) -> int:
     return component.speed_test_bytes or DEFAULT_SPEED_TEST_BYTES
 
@@ -192,7 +199,7 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
             _terminate_process(proc, pid_path)
 
 
-def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSessionHandle | None:
+def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnStartResult:
     config_text = _config_text(component)
     netns = netns_name_for_component(component.id)
     tun_dev = tun_name_for_component(component.id)
@@ -232,40 +239,52 @@ def start_openvpn_persistent_session(component: MonitoredComponent) -> OpenVpnSe
         start_new_session=True,
     )
 
-    timeout = component.timeout_seconds
-    iface = _wait_for_tun_interface(timeout=min(timeout, 120), device=tun_dev)
+    # Persistent handshakes often need longer than short HTTP-style timeouts.
+    connect_timeout = min(max(component.timeout_seconds, 60), 120)
+    iface = _wait_for_tun_interface(timeout=connect_timeout, device=tun_dev)
     connect_time_ms = int((time.perf_counter() - connect_started) * 1000)
     if iface is None:
+        log_tail = _read_tail(log_path)
+        hint = _vpn_log_hint(log_tail)
+        message = "OpenVPN tunnel did not come up in time"
+        if hint:
+            message = f"{message}: {hint}"
         _terminate_process(proc, pid_path)
         _cleanup_persistent_tmpdir(tmpdir)
         delete_netns(netns)
-        return None
+        return OpenVpnStartResult(handle=None, log_tail=log_tail, error_message=message)
 
     gateway = _tun_peer_gateway(iface)
     try:
         move_iface_to_netns(iface, netns, gateway=gateway)
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as exc:
+        log_tail = _read_tail(log_path)
+        message = f"Failed to move TUN into netns {netns!r}: {exc}"
         _terminate_process(proc, pid_path)
         _cleanup_persistent_tmpdir(tmpdir)
         delete_netns(netns)
-        return None
+        return OpenVpnStartResult(handle=None, log_tail=log_tail, error_message=message)
 
     if not _interface_is_up(iface, netns=netns):
+        log_tail = _read_tail(log_path)
+        message = f"TUN {iface} was not up after moving into netns {netns}"
         _terminate_process(proc, pid_path)
         _cleanup_persistent_tmpdir(tmpdir)
         delete_netns(netns)
-        return None
+        return OpenVpnStartResult(handle=None, log_tail=log_tail, error_message=message)
 
-    return OpenVpnSessionHandle(
-        component_id=component.id,
-        netns=netns,
-        proc=proc,
-        iface=iface,
-        tmpdir=tmpdir,
-        config_path=config_path,
-        log_path=log_path,
-        pid_path=pid_path,
-        connect_time_ms=connect_time_ms,
+    return OpenVpnStartResult(
+        handle=OpenVpnSessionHandle(
+            component_id=component.id,
+            netns=netns,
+            proc=proc,
+            iface=iface,
+            tmpdir=tmpdir,
+            config_path=config_path,
+            log_path=log_path,
+            pid_path=pid_path,
+            connect_time_ms=connect_time_ms,
+        )
     )
 
 
