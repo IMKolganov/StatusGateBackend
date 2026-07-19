@@ -340,6 +340,47 @@ class TestPersistentWorkerSessionEvents:
         record.assert_called_once()
         assert record.call_args.args[1] == ConnectionEventType.RECONNECT.value
 
+    def test_persist_result_keeps_check_result_attrs_readable(self, db_session) -> None:
+        """Regression: expire_on_commit must not break TUNNEL_UP event recording."""
+        from app.models.component_kind import ComponentKind
+        from app.models.project import Project
+
+        project = Project(name="P", slug=f"p-{uuid4().hex[:8]}", is_active=True)
+        kind = ComponentKind(name="VPN", slug=f"k-{uuid4().hex[:8]}")
+        db_session.add_all([project, kind])
+        db_session.flush()
+        component = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=kind.id,
+            name="VPN",
+            slug=f"vpn-{uuid4().hex[:8]}",
+            check_url="https://ifconfig.me/ip",
+            check_method="GET",
+            check_type="openvpn",
+            check_config={"config_text": "client\n"},
+            expected_status_code=200,
+            timeout_seconds=60,
+            connection_mode=ConnectionMode.PERSISTENT.value,
+            is_active=True,
+        )
+        db_session.add(component)
+        db_session.commit()
+
+        worker = _PersistentOpenVpnWorker(component.id, MagicMock())
+        checked_at = datetime.now(UTC)
+        result = CheckResult(
+            monitored_component_id=component.id,
+            checked_at=checked_at,
+            outcome=CheckOutcome.UP.value,
+            error_message=None,
+            details={"session_event": ConnectionEventType.TUNNEL_UP.value},
+        )
+        worker._persist_result(component, result)
+
+        assert result.checked_at == checked_at
+        assert result.outcome == CheckOutcome.UP.value
+        assert result.details["session_event"] == ConnectionEventType.TUNNEL_UP.value
+
     def test_save_session_event_with_handle_records_tunnel_up(self) -> None:
         from app.services.vpn_check_service import OpenVpnSessionHandle
 

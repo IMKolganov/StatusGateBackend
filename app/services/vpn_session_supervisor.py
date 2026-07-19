@@ -208,6 +208,10 @@ class _PersistentOpenVpnWorker(threading.Thread):
             session.add(component_row)
             CheckResultRepository(session).add(result)
             session.commit()
+            # expire_on_commit leaves attrs expired; refresh+expunge keeps them readable
+            # after the session closes (TUNNEL_UP / probe transition paths).
+            session.refresh(result)
+            session.expunge(result)
 
     def _record_connection_event(
         self,
@@ -258,21 +262,24 @@ class _PersistentOpenVpnWorker(threading.Thread):
             )
 
     def _maybe_record_probe_transition(self, component: MonitoredComponent, result: CheckResult) -> None:
-        if result.outcome not in {CheckOutcome.UP.value, CheckOutcome.DEGRADED.value}:
+        outcome = result.outcome
+        if outcome not in {CheckOutcome.UP.value, CheckOutcome.DEGRADED.value}:
             return
 
-        probe_ok = result.outcome == CheckOutcome.UP.value
+        probe_ok = outcome == CheckOutcome.UP.value
         details = result.details if isinstance(result.details, dict) else None
         network = details.get("network") if isinstance(details, dict) else None
         probe = network.get("probe") if isinstance(network, dict) else None
         event_details = {"probe": probe} if isinstance(probe, dict) else None
+        occurred_at = result.checked_at
+        error_message = result.error_message
 
         if self._last_probe_ok is False and probe_ok:
             self._record_connection_event(
                 component,
                 ConnectionEventType.AVAILABLE.value,
-                occurred_at=result.checked_at,
-                outcome=result.outcome,
+                occurred_at=occurred_at,
+                outcome=outcome,
                 message="Probe succeeded through VPN tunnel",
                 details=event_details,
             )
@@ -280,9 +287,9 @@ class _PersistentOpenVpnWorker(threading.Thread):
             self._record_connection_event(
                 component,
                 ConnectionEventType.UNAVAILABLE.value,
-                occurred_at=result.checked_at,
-                outcome=result.outcome,
-                message=result.error_message or "Probe failed through VPN tunnel",
+                occurred_at=occurred_at,
+                outcome=outcome,
+                message=error_message or "Probe failed through VPN tunnel",
                 details=event_details,
             )
 
@@ -359,14 +366,18 @@ class _PersistentOpenVpnWorker(threading.Thread):
             speed_test_context=speed_test_context,
             session_event=event,
         )
+        occurred_at = result.checked_at
+        outcome = result.outcome
+        message = result.error_message
+        event_details = _connection_event_details(result.details if isinstance(result.details, dict) else None)
         self._persist_result(component, result)
         self._record_connection_event(
             component,
             event,
-            occurred_at=result.checked_at,
-            outcome=result.outcome,
-            message=result.error_message,
-            details=_connection_event_details(result.details if isinstance(result.details, dict) else None),
+            occurred_at=occurred_at,
+            outcome=outcome,
+            message=message,
+            details=event_details,
         )
 
 
