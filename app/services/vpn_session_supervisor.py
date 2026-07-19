@@ -13,7 +13,13 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models.check_result import CheckResult
-from app.models.enums import CheckOutcome, ConnectionEventType, ConnectionMode, PERSISTENT_VPN_CHECK_TYPES
+from app.models.enums import (
+    CheckOutcome,
+    ConnectionEventType,
+    ConnectionMode,
+    PERSISTENT_VPN_CHECK_TYPES,
+    VPN_CHECK_TYPES,
+)
 from app.models.monitored_component import MonitoredComponent
 from app.models.project import Project
 from app.services.connection_event_service import record_connection_event
@@ -23,6 +29,7 @@ from app.services.speed_test_config import (
     effective_speed_test_url_template,
     extract_last_successful_speed_test,
     extract_speed_test_from_details,
+    pick_staggered_speed_test_component_ids,
     should_run_speed_test,
 )
 from app.services.vpn_check_service import (
@@ -189,12 +196,28 @@ class _PersistentOpenVpnWorker(threading.Thread):
     def _build_speed_test_context(self, component: MonitoredComponent) -> SpeedTestRunContext:
         with SessionLocal() as session:
             settings = MonitoringSettingsRepository(session).get()
-            latest_map = CheckResultRepository(session).latest_by_component_ids([component.id])
+            vpn_components = list(
+                session.scalars(
+                    select(MonitoredComponent)
+                    .join(Project, MonitoredComponent.project_id == Project.id)
+                    .where(
+                        MonitoredComponent.is_active.is_(True),
+                        Project.is_active.is_(True),
+                        MonitoredComponent.check_type.in_(VPN_CHECK_TYPES),
+                        MonitoredComponent.speed_test_enabled.is_(True),
+                    )
+                ).all()
+            )
+            latest_map = CheckResultRepository(session).latest_by_component_ids(
+                [row.id for row in vpn_components] or [component.id]
+            )
             latest = latest_map.get(component.id)
             latest_details = latest.details if latest and isinstance(latest.details, dict) else None
+            allowed_ids = pick_staggered_speed_test_component_ids(vpn_components, settings, latest_map)
+            due = should_run_speed_test(component, settings, latest)
             return SpeedTestRunContext(
                 url_template=effective_speed_test_url_template(component, settings),
-                run_speed_test=should_run_speed_test(component, settings, latest),
+                run_speed_test=due and component.id in allowed_ids,
                 previous_speed_test=extract_speed_test_from_details(latest_details),
                 last_successful_speed_test=extract_last_successful_speed_test(latest_details),
             )

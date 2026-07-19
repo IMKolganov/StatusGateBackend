@@ -144,12 +144,14 @@ class TestVpnHelpers:
                 "speed_test": {
                     "ok": False,
                     "error": "Speed test rate limited (HTTP 429)",
+                    "measured_at": "2026-07-20T01:00:00+00:00",
                 },
                 "speed_test_last_success": {
                     "ok": True,
                     "mbps": 18.5,
                     "bytes": 524288,
                     "duration_ms": 800,
+                    "measured_at": "2026-07-20T00:00:00+00:00",
                 },
             }
         }
@@ -157,8 +159,33 @@ class TestVpnHelpers:
         assert summary is not None
         assert summary.download_mbps == 18.5
         assert summary.speed_test_ok is True
-        assert summary.speed_test_error is not None
-        assert "last successful measurement" in summary.speed_test_error
+        assert summary.speed_test_showing_last_success is True
+        assert summary.speed_test_last_success_at == "2026-07-20T00:00:00+00:00"
+        assert summary.speed_test_error == "Speed test rate limited (HTTP 429)"
+
+    def test_public_network_summary_generic_fail_shows_last_success(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": False,
+                    "error": "curl: (56) Failure",
+                    "measured_at": "2026-07-20T01:10:00+00:00",
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "mbps": 91.2,
+                    "bytes": 10485760,
+                    "duration_ms": 900,
+                    "measured_at": "2026-07-20T00:10:00+00:00",
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps == 91.2
+        assert summary.speed_test_ok is True
+        assert summary.speed_test_showing_last_success is True
+        assert summary.speed_test_error == "Speed test failed"
 
     def test_format_speed_test_error_from_httpx_message(self) -> None:
         raw = (

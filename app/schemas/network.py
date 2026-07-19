@@ -25,3 +25,6 @@ class NetworkSummary(BaseModel):
     download_duration_ms: int | None = None
     speed_test_ok: bool | None = None
     speed_test_error: str | None = None
+    speed_test_measured_at: str | None = None
+    speed_test_last_success_at: str | None = None
+    speed_test_showing_last_success: bool | None = None

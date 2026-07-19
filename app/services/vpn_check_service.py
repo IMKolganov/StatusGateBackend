@@ -22,10 +22,9 @@ from app.schemas.network import NetworkSummary
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     build_speed_test_url,
-    is_cloudflare_speed_test_template,
-    is_rate_limited_speed_test,
     pick_display_speed_test,
-    try_acquire_cloudflare_speed_test_slot,
+    stamp_speed_test_measured_at,
+    try_acquire_speed_test_slot,
 )
 from app.services.vpn_netns import (
     delete_netns,
@@ -726,7 +725,7 @@ def _enrich_network_metrics(
         return
 
     url = build_speed_test_url(speed_test_context.url_template, speed_test_bytes)
-    if is_cloudflare_speed_test_template(speed_test_context.url_template) and not try_acquire_cloudflare_speed_test_slot():
+    if not try_acquire_speed_test_slot():
         _apply_cached_speed_test(network, speed_test_context, throttled=True)
         return
 
@@ -737,6 +736,7 @@ def _enrich_network_metrics(
         netns=netns,
     )
     if speed:
+        speed = stamp_speed_test_measured_at(speed)
         network["speed_test"] = speed
         if speed.get("ok"):
             network["speed_test_last_success"] = speed
@@ -835,6 +835,10 @@ def _format_speed_test_error(error: Any) -> str:
     if not message:
         return "Speed test failed"
 
+    # Already normalized messages from an earlier formatting pass.
+    if message.startswith("Speed test "):
+        return message
+
     status_match = re.search(r"Client error '(\d{3})", message)
     if status_match:
         status_code = int(status_match.group(1))
@@ -843,6 +847,9 @@ def _format_speed_test_error(error: Any) -> str:
         if status_code == 403:
             return "Speed test blocked (HTTP 403)"
         return f"Speed test failed (HTTP {status_code})"
+
+    if "429" in message or "rate limit" in message.lower():
+        return "Speed test rate limited (HTTP 429)"
 
     if re.search(r"\btimeout\b", message, re.IGNORECASE):
         return "Speed test timed out"
@@ -1176,6 +1183,12 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
     download_bytes = speed_test.get("bytes")
     download_duration_ms = speed_test.get("duration_ms")
 
+    showing_last_success = False
+    measured_at = speed_test.get("measured_at") if isinstance(speed_test.get("measured_at"), str) else None
+    last_success_at = (
+        last_success.get("measured_at") if isinstance(last_success.get("measured_at"), str) else None
+    )
+
     if speed_test:
         if speed_test.get("ok") is True:
             speed_test_ok = True
@@ -1183,19 +1196,27 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
             speed_test_ok = False
             raw_error = speed_test.get("error")
             speed_test_error = _format_speed_test_error(raw_error) if raw_error else "Speed test failed"
-            if is_rate_limited_speed_test(speed_test) and last_success.get("mbps") is not None:
+            if last_success.get("mbps") is not None:
                 download_mbps = last_success.get("mbps")
                 download_bytes = last_success.get("bytes")
                 download_duration_ms = last_success.get("duration_ms")
                 speed_test_ok = True
-                speed_test_error = (
-                    f"{speed_test_error} (showing last successful measurement)"
-                )
+                showing_last_success = True
+                if not last_success_at and isinstance(last_success.get("measured_at"), str):
+                    last_success_at = last_success.get("measured_at")
         elif speed_test.get("stale") and speed_test.get("mbps") is not None:
             speed_test_ok = True
+            showing_last_success = True
             download_mbps = speed_test.get("mbps")
             download_bytes = speed_test.get("bytes")
             download_duration_ms = speed_test.get("duration_ms")
+            if not last_success_at and isinstance(speed_test.get("measured_at"), str):
+                last_success_at = speed_test.get("measured_at")
+        if speed_test.get("cached") and speed_test.get("ok") is True:
+            showing_last_success = showing_last_success or bool(speed_test.get("stale") or speed_test.get("throttled"))
+
+    if showing_last_success and not last_success_at and isinstance(measured_at, str):
+        last_success_at = measured_at
 
     summary = NetworkSummary(
         interface=network.get("interface"),
@@ -1217,6 +1238,9 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
         download_duration_ms=download_duration_ms,
         speed_test_ok=speed_test_ok,
         speed_test_error=speed_test_error,
+        speed_test_measured_at=measured_at if isinstance(measured_at, str) else None,
+        speed_test_last_success_at=last_success_at if isinstance(last_success_at, str) else None,
+        speed_test_showing_last_success=showing_last_success or None,
     )
     if summary.model_dump(exclude_none=True):
         return summary
