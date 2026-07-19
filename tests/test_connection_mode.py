@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -176,6 +177,17 @@ class TestVpnNetnsHelpers:
             with patch("app.services.vpn_netns.subprocess.check_call") as check_call:
                 ensure_netns("sg-test")
         check_call.assert_not_called()
+
+    def test_ensure_netns_permission_error_is_actionable(self) -> None:
+        from app.services.vpn_netns import NetnsPermissionError
+
+        with patch("app.services.vpn_netns.list_netns_names", return_value=set()):
+            with patch(
+                "app.services.vpn_netns.subprocess.check_call",
+                side_effect=subprocess.CalledProcessError(1, ["ip", "netns", "add", "sg-test"]),
+            ):
+                with pytest.raises(NetnsPermissionError, match="SYS_ADMIN"):
+                    ensure_netns("sg-test")
 
 
 class TestPersistentProbeHelpers:

@@ -33,6 +33,10 @@ from app.services.vpn_check_service import (
     start_openvpn_persistent_session,
     stop_openvpn_persistent_session,
 )
+from app.services.vpn_netns import NetnsPermissionError
+
+# Capability / host misconfig will not heal by retrying every 5s.
+_NETNS_PERMISSION_BACKOFF_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,20 @@ class _PersistentOpenVpnWorker(threading.Thread):
 
                     interval = self._probe_interval_seconds(component)
                     if self._stop.wait(interval):
+                        break
+                except NetnsPermissionError:
+                    logger.error(
+                        "Persistent OpenVPN worker for component %s cannot create netns; "
+                        "add SYS_ADMIN (or privileged) to the worker container and recreate it. "
+                        "Retrying in %ss.",
+                        self._component_id,
+                        _NETNS_PERMISSION_BACKOFF_SECONDS,
+                        exc_info=True,
+                    )
+                    if handle is not None:
+                        stop_openvpn_persistent_session(handle)
+                        handle = None
+                    if self._stop.wait(_NETNS_PERMISSION_BACKOFF_SECONDS):
                         break
                 except Exception:
                     logger.exception("Persistent OpenVPN worker failed for component %s", self._component_id)

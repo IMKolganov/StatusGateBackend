@@ -21,6 +21,8 @@ services:
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
+      # Required for persistent OpenVPN: ip netns add mounts /run/netns
+      - SYS_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
@@ -51,6 +53,8 @@ services:
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
+      # Required for persistent OpenVPN: ip netns add mounts /run/netns
+      - SYS_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     command: sh -c "alembic upgrade head && python -m app.worker"
