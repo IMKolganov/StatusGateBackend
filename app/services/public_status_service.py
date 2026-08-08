@@ -183,6 +183,7 @@ class PublicStatusService:
         ).all()
         events = [
             PublicTunnelConnectionEvent(
+                id=event.id,
                 occurred_at=event.occurred_at,
                 event_type=event.event_type,
                 outcome=event.outcome,

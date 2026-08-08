@@ -101,6 +101,7 @@ class PublicTunnelMetricPoint(BaseModel):
 
 
 class PublicTunnelConnectionEvent(BaseModel):
+    id: UUID
     occurred_at: datetime
     event_type: str
     outcome: str | None = None

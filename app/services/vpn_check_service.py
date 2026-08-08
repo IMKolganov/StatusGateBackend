@@ -365,6 +365,9 @@ def run_openvpn_persistent_probe(
             speed_test_context=speed_test_context,
             netns=handle.netns,
         )
+    else:
+        # Keep last successful speed on the public row even when the HTTP probe fails.
+        _apply_cached_speed_test(network, speed_test_context)
 
     if probe.get("ok"):
         outcome = CheckOutcome.UP.value

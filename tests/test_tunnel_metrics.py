@@ -162,6 +162,7 @@ def test_tunnel_metrics_mixed_points_and_events(
     assert body["points"][1]["gateway_ping_avg_ms"] is None
     assert body["points"][2]["gateway_ping_loss_percent"] == 25.0
     assert [event["event_type"] for event in body["events"]] == ["tunnel_down", "tunnel_up"]
+    assert all(event.get("id") for event in body["events"])
 
 
 def test_tunnel_metrics_unknown_slug(client: TestClient, admin_headers: dict) -> None:

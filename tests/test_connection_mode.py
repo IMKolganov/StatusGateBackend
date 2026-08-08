@@ -262,6 +262,17 @@ class TestPersistentProbeHelpers:
             pid_path=MagicMock(),
             connect_time_ms=900,
         )
+        last_success = {
+            "ok": True,
+            "bytes": 10485760,
+            "mbps": 91.2,
+            "measured_at": "2026-08-08T10:00:00+00:00",
+        }
+        context = SpeedTestRunContext(
+            url_template=SpeedTestRunContext.default().url_template,
+            run_speed_test=False,
+            last_successful_speed_test=last_success,
+        )
         with patch.object(vpn, "is_openvpn_persistent_session_up", return_value=True):
             with patch.object(vpn, "_collect_network_details", return_value={"gateway": "10.8.0.1"}):
                 with patch.object(
@@ -272,11 +283,14 @@ class TestPersistentProbeHelpers:
                     result = vpn.run_openvpn_persistent_probe(
                         component,
                         handle,
-                        speed_test_context=SpeedTestRunContext.default(),
+                        speed_test_context=context,
                     )
         assert result.outcome == CheckOutcome.DEGRADED.value
         assert result.details["connection_mode"] == ConnectionMode.PERSISTENT.value
         assert result.details["session_event"] == "probe"
+        assert result.details["network"]["speed_test"]["mbps"] == 91.2
+        assert result.details["network"]["speed_test"]["cached"] is True
+        assert result.details["network"]["speed_test_last_success"]["mbps"] == 91.2
 
     def test_run_openvpn_persistent_probe_down_when_tunnel_down(self) -> None:
         component = _vpn_component()
