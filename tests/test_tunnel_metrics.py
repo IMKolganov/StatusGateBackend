@@ -185,3 +185,120 @@ def test_tunnel_metrics_unknown_slug(client: TestClient, admin_headers: dict) ->
 
     missing_service = client.get(f"/api/status/projects/{project['slug']}/services/missing/tunnel-metrics")
     assert missing_service.status_code == 404
+
+
+def test_tunnel_metrics_inactive_project_and_service(client: TestClient, admin_headers: dict) -> None:
+    kind = _create_kind(client, slug="openvpn-inactive")
+    project = client.post(
+        "/api/admin/projects",
+        json={"name": "Hidden Tunnel", "slug": "tunnel-hidden", "description": None, "is_active": False},
+    ).json()["data"]
+    assert project["is_active"] is False
+
+    hidden_project = client.get("/api/status/projects/tunnel-hidden/services/any/tunnel-metrics")
+    assert hidden_project.status_code == 404
+
+    active = _create_project(client, slug="tunnel-inactive-svc")
+    component = client.post(
+        "/api/admin/monitored-components",
+        json={
+            "project_id": active["id"],
+            "component_kind_id": kind["id"],
+            "name": "Disabled VPN",
+            "slug": "disabled-vpn",
+            "check_type": "openvpn",
+            "check_config": {"config_text": "client\ndev tun\nproto udp\nremote vpn.example.com 1194\n"},
+            "timeout_seconds": 30,
+        },
+    ).json()["data"]
+    patched = client.patch(
+        f"/api/admin/monitored-components/{component['id']}",
+        json={"is_active": False},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["data"]["is_active"] is False
+
+    response = client.get(
+        f"/api/status/projects/{active['slug']}/services/{component['slug']}/tunnel-metrics"
+    )
+    assert response.status_code == 404
+
+
+def test_tunnel_metrics_hours_bounds_and_no_leak(
+    client: TestClient,
+    admin_headers: dict,
+    db_session: Session,
+) -> None:
+    kind = _create_kind(client, slug="openvpn-bounds")
+    project = _create_project(client, slug="tunnel-bounds")
+    component = client.post(
+        "/api/admin/monitored-components",
+        json={
+            "project_id": project["id"],
+            "component_kind_id": kind["id"],
+            "name": "Bounds VPN",
+            "slug": "bounds-vpn",
+            "check_type": "openvpn",
+            "check_config": {
+                "config_text": "client\ndev tun\nproto udp\nremote secret.example.com 1194\n# secret-line\n"
+            },
+            "timeout_seconds": 30,
+        },
+    ).json()["data"]
+
+    too_low = client.get(
+        f"/api/status/projects/{project['slug']}/services/{component['slug']}/tunnel-metrics",
+        params={"hours": 1},
+    )
+    assert too_low.status_code == 422
+
+    too_high = client.get(
+        f"/api/status/projects/{project['slug']}/services/{component['slug']}/tunnel-metrics",
+        params={"hours": 25},
+    )
+    assert too_high.status_code == 422
+
+    now = datetime.now(UTC)
+    db_session.add(
+        CheckResult(
+            monitored_component_id=UUID(component["id"]),
+            checked_at=now - timedelta(minutes=10),
+            outcome=CheckOutcome.DOWN.value,
+            latency_ms=6,
+            error_message="OpenVPN tunnel is down",
+            details={
+                "check_type": "openvpn",
+                "config_text": "SHOULD_NOT_LEAK",
+                "log_tail": "secret log",
+                "network": {
+                    "connect_time_ms": 511,
+                    "gateway_ping": {"avg_ms": 12.0, "jitter_ms": 1.0, "loss_percent": 100.0},
+                },
+            },
+        )
+    )
+    db_session.commit()
+
+    ok = client.get(
+        f"/api/status/projects/{project['slug']}/services/{component['slug']}/tunnel-metrics",
+        params={"hours": 24},
+    )
+    assert ok.status_code == 200, ok.text
+    body = _data(ok)
+    assert body["hours"] == 24
+    assert len(body["points"]) == 1
+    point = body["points"][0]
+    assert set(point.keys()) <= {
+        "checked_at",
+        "outcome",
+        "latency_ms",
+        "gateway_ping_avg_ms",
+        "gateway_ping_jitter_ms",
+        "gateway_ping_loss_percent",
+    }
+    raw = ok.text
+    assert "SHOULD_NOT_LEAK" not in raw
+    assert "secret log" not in raw
+    assert "config_text" not in raw
+    assert "secret.example.com" not in raw
+    assert "check_config" not in body

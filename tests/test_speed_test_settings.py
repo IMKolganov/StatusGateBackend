@@ -628,6 +628,74 @@ class TestHealthCheckRunnerSpeedTestContext:
             "sample_count": 1,
         }
 
+    def test_latest_with_meaningful_speed_test_skips_zero_mbps(self, db_session: Session) -> None:
+        from app.models.project import Project
+        from app.services.monitoring_service import CheckResultRepository
+
+        project = Project(name="Zero", slug="zero-proj", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+
+        component = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Zero VPN",
+            slug="zero-vpn",
+            check_url="https://ifconfig.me/ip",
+            check_method="GET",
+            check_type=CheckType.OPENVPN.value,
+            check_config={"config_text": "client\ndev tun\nremote x 1194\n"},
+            expected_status_code=200,
+            timeout_seconds=60,
+            speed_test_enabled=True,
+            is_active=True,
+        )
+        db_session.add(component)
+        db_session.flush()
+
+        good_at = datetime.now(UTC) - timedelta(hours=2)
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component.id,
+                checked_at=good_at,
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "bytes": 10485760,
+                            "mbps": 88.0,
+                            "measured_at": good_at.isoformat(),
+                        },
+                        "speed_test_last_success": {
+                            "ok": True,
+                            "bytes": 10485760,
+                            "mbps": 88.0,
+                            "measured_at": good_at.isoformat(),
+                        },
+                    }
+                },
+            )
+        )
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component.id,
+                checked_at=good_at + timedelta(minutes=5),
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {"ok": True, "bytes": 0, "mbps": 0.0},
+                    }
+                },
+            )
+        )
+        db_session.commit()
+
+        found = CheckResultRepository(db_session).latest_with_meaningful_speed_test(component.id)
+        assert found is not None
+        assert found.checked_at == good_at
+        assert found.details["network"]["speed_test"]["mbps"] == 88.0
+
     def test_run_due_checks_staggers_speed_tests_to_one_vpn(self, db_session: Session) -> None:
         from app.models.project import Project
 
