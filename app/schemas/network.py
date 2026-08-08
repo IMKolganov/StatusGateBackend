@@ -17,6 +17,8 @@ class NetworkSummary(BaseModel):
     probe_url: str | None = None
     exit_ip: str | None = None
     probe_latency_ms: int | None = None
+    google_probe_ok: bool | None = None
+    google_probe_latency_ms: int | None = None
     gateway_ping_avg_ms: float | None = None
     gateway_ping_loss_percent: float | None = None
     gateway_ping_jitter_ms: float | None = None

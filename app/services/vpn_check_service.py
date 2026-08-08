@@ -42,6 +42,9 @@ from app.services.xray_config import parse_xray_config_text
 _vpn_check_lock = threading.Lock()
 
 DEFAULT_PROBE_URL = "https://ifconfig.me/ip"
+# Same endpoint Android uses for connectivity checks: exercises the path from
+# the VPN exit toward Google — the segment that matters for YouTube-style stalls.
+GOOGLE_PROBE_URL = "https://www.gstatic.com/generate_204"
 RECONNECT_DELAY_SECONDS = 5
 
 
@@ -158,6 +161,7 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
 
             probe = _probe_endpoint(probe_url, timeout=min(15, timeout))
             network["probe"] = probe
+            network["google_probe"] = _probe_endpoint(GOOGLE_PROBE_URL, timeout=min(10, timeout))
 
             if probe.get("ok"):
                 speed_test_bytes = _speed_test_bytes_for(component)
@@ -316,6 +320,11 @@ def is_openvpn_persistent_session_up(handle: OpenVpnSessionHandle) -> bool:
     return _interface_is_up(handle.iface, netns=handle.netns)
 
 
+def resolve_persistent_gateway(handle: OpenVpnSessionHandle) -> str | None:
+    """In-tunnel gateway IP for the continuous pinger (first VPN hop)."""
+    return _resolve_tun_gateway(handle.iface, log_tail=_read_tail(handle.log_path), netns=handle.netns)
+
+
 def run_openvpn_persistent_probe(
     component: MonitoredComponent,
     handle: OpenVpnSessionHandle,
@@ -352,6 +361,7 @@ def run_openvpn_persistent_probe(
 
     probe = _probe_endpoint(probe_url, timeout=min(15, timeout), netns=handle.netns)
     network["probe"] = probe
+    network["google_probe"] = _probe_endpoint(GOOGLE_PROBE_URL, timeout=min(10, timeout), netns=handle.netns)
 
     if probe.get("ok"):
         speed_test_bytes = _speed_test_bytes_for(component)
@@ -470,6 +480,7 @@ def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedT
 
             probe_result = _probe_endpoint(probe_url, timeout=min(15, timeout), proxy_url=proxy_url)
             network["probe"] = probe_result
+            network["google_probe"] = _probe_endpoint(GOOGLE_PROBE_URL, timeout=min(10, timeout), proxy_url=proxy_url)
 
             probe_ok = bool(probe_result.get("ok"))
             if probe_ok:
@@ -1254,6 +1265,8 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
 
     probe_value = network.get("probe")
     probe: dict[str, Any] = probe_value if isinstance(probe_value, dict) else {}
+    google_probe_value = network.get("google_probe")
+    google_probe: dict[str, Any] = google_probe_value if isinstance(google_probe_value, dict) else {}
     gateway_ping_value = network.get("gateway_ping")
     gateway_ping: dict[str, Any] = gateway_ping_value if isinstance(gateway_ping_value, dict) else {}
     speed_test_value = network.get("speed_test")
@@ -1347,6 +1360,8 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
         probe_url=probe.get("url"),
         exit_ip=probe.get("exit_ip"),
         probe_latency_ms=probe.get("latency_ms"),
+        google_probe_ok=google_probe.get("ok") if google_probe else None,
+        google_probe_latency_ms=google_probe.get("latency_ms"),
         gateway_ping_avg_ms=gateway_ping.get("avg_ms"),
         gateway_ping_loss_percent=gateway_ping.get("loss_percent"),
         gateway_ping_jitter_ms=gateway_ping.get("jitter_ms"),

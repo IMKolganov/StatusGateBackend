@@ -15,6 +15,7 @@ from app.models.enums import CheckOutcome, IncidentUpdateStatus
 from app.models.incident import Incident
 from app.models.incident_update import IncidentUpdate
 from app.models.monitored_component import MonitoredComponent
+from app.models.tunnel_ping_sample import TunnelPingSample
 from app.schemas.network import NetworkSummary
 from app.schemas.public_status import (
     PublicActiveAlert,
@@ -30,6 +31,7 @@ from app.schemas.public_status import (
     PublicTunnelLatestDiagnostics,
     PublicTunnelMetricPoint,
     PublicTunnelMetrics,
+    PublicTunnelPingSample,
 )
 from app.services.uptime_stats import (
     DayCheckStats,
@@ -168,6 +170,31 @@ class PublicStatusService:
                 )
             )
 
+        sample_rows = self._session.scalars(
+            select(TunnelPingSample)
+            .where(
+                TunnelPingSample.monitored_component_id == component.id,
+                TunnelPingSample.bucket_start >= range_start,
+                TunnelPingSample.bucket_start <= range_end,
+            )
+            .order_by(TunnelPingSample.bucket_start.asc(), TunnelPingSample.target.asc())
+        ).all()
+        ping_samples = [
+            PublicTunnelPingSample(
+                bucket_start=sample.bucket_start,
+                target=sample.target,
+                target_host=sample.target_host,
+                samples_sent=sample.samples_sent,
+                samples_received=sample.samples_received,
+                loss_percent=sample.loss_percent,
+                min_ms=sample.min_ms,
+                avg_ms=sample.avg_ms,
+                max_ms=sample.max_ms,
+                jitter_ms=sample.jitter_ms,
+            )
+            for sample in sample_rows
+        ]
+
         event_rows = self._session.scalars(
             select(ConnectionEvent)
             .where(
@@ -199,6 +226,7 @@ class PublicStatusService:
             hours=hours,
             latest=_build_tunnel_latest_diagnostics(check_rows, points),
             points=points,
+            ping_samples=ping_samples,
             events=events,
         )
 
@@ -548,6 +576,7 @@ def _build_tunnel_metric_point(
 
     ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
     probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
+    google_probe = network.get("google_probe") if isinstance(network.get("google_probe"), dict) else {}
     speed = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
 
     download_mbps: float | None = None
@@ -584,6 +613,8 @@ def _build_tunnel_metric_point(
         connect_time_ms=_as_int(network.get("connect_time_ms")),
         exit_ip=exit_ip,
         probe_latency_ms=_as_float(probe.get("latency_ms")),
+        google_probe_ok=google_probe.get("ok") if isinstance(google_probe.get("ok"), bool) else None,
+        google_probe_latency_ms=_as_float(google_probe.get("latency_ms")),
         gateway_ping_avg_ms=_as_float(ping.get("avg_ms")),
         gateway_ping_jitter_ms=_as_float(ping.get("jitter_ms")),
         gateway_ping_loss_percent=_as_float(ping.get("loss_percent")),
@@ -632,6 +663,8 @@ def _build_tunnel_latest_diagnostics(
         exit_ip=summary.exit_ip,
         connect_time_ms=summary.connect_time_ms,
         probe_latency_ms=_as_float(summary.probe_latency_ms),
+        google_probe_ok=summary.google_probe_ok,
+        google_probe_latency_ms=_as_float(summary.google_probe_latency_ms),
         gateway_ping_avg_ms=summary.gateway_ping_avg_ms,
         gateway_ping_jitter_ms=summary.gateway_ping_jitter_ms,
         gateway_ping_loss_percent=summary.gateway_ping_loss_percent,

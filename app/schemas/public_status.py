@@ -98,6 +98,8 @@ class PublicTunnelMetricPoint(BaseModel):
     connect_time_ms: int | None = None
     exit_ip: str | None = None
     probe_latency_ms: float | None = None
+    google_probe_ok: bool | None = None
+    google_probe_latency_ms: float | None = None
     gateway_ping_avg_ms: float | None = None
     gateway_ping_jitter_ms: float | None = None
     gateway_ping_loss_percent: float | None = None
@@ -109,6 +111,21 @@ class PublicTunnelMetricPoint(BaseModel):
     speed_test_measured_at: str | None = None
 
 
+class PublicTunnelPingSample(BaseModel):
+    """One minute of the continuous in-tunnel pinger (1 packet/second)."""
+
+    bucket_start: datetime
+    target: str = Field(description="'gateway' (first VPN hop) or 'internet' (host beyond the exit)")
+    target_host: str | None = None
+    samples_sent: int
+    samples_received: int
+    loss_percent: float | None = None
+    min_ms: float | None = None
+    avg_ms: float | None = None
+    max_ms: float | None = None
+    jitter_ms: float | None = None
+
+
 class PublicTunnelLatestDiagnostics(BaseModel):
     """Public-safe snapshot of the newest check — full tunnel diagnostics, not ping-only."""
 
@@ -117,6 +134,8 @@ class PublicTunnelLatestDiagnostics(BaseModel):
     exit_ip: str | None = None
     connect_time_ms: int | None = None
     probe_latency_ms: float | None = None
+    google_probe_ok: bool | None = None
+    google_probe_latency_ms: float | None = None
     gateway_ping_avg_ms: float | None = None
     gateway_ping_jitter_ms: float | None = None
     gateway_ping_loss_percent: float | None = None
@@ -155,4 +174,5 @@ class PublicTunnelMetrics(BaseModel):
     hours: int
     latest: PublicTunnelLatestDiagnostics | None = None
     points: list[PublicTunnelMetricPoint]
+    ping_samples: list[PublicTunnelPingSample] = []
     events: list[PublicTunnelConnectionEvent] = []

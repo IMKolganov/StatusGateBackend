@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models.check_result import CheckResult
 from app.models.connection_event import ConnectionEvent
 from app.models.enums import CheckOutcome, ConnectionEventType
+from app.models.tunnel_ping_sample import TunnelPingSample
 
 
 def _data(response):
@@ -119,6 +120,7 @@ def test_tunnel_metrics_mixed_points_and_events(
                     "connect_time_ms": 1400,
                     "gateway_ping": {"avg_ms": 41.2, "jitter_ms": 8.1, "loss_percent": 25.0},
                     "probe": {"latency_ms": 95.0, "exit_ip": "203.0.113.55", "ok": True},
+                    "google_probe": {"ok": True, "latency_ms": 210.0, "status_code": 204},
                     "speed_test": {
                         "ok": True,
                         "mbps": 91.2,
@@ -135,6 +137,48 @@ def test_tunnel_metrics_mixed_points_and_events(
                     },
                 }
             },
+        )
+    )
+    db_session.add(
+        TunnelPingSample(
+            monitored_component_id=component_id,
+            bucket_start=now - timedelta(minutes=10),
+            target="gateway",
+            target_host="10.8.0.1",
+            samples_sent=55,
+            samples_received=55,
+            loss_percent=0.0,
+            min_ms=30.1,
+            avg_ms=34.2,
+            max_ms=88.7,
+            jitter_ms=6.3,
+        )
+    )
+    db_session.add(
+        TunnelPingSample(
+            monitored_component_id=component_id,
+            bucket_start=now - timedelta(minutes=10),
+            target="internet",
+            target_host="8.8.8.8",
+            samples_sent=55,
+            samples_received=52,
+            loss_percent=5.45,
+            min_ms=42.0,
+            avg_ms=48.9,
+            max_ms=140.2,
+            jitter_ms=11.0,
+        )
+    )
+    # Outside the window — must be ignored
+    db_session.add(
+        TunnelPingSample(
+            monitored_component_id=component_id,
+            bucket_start=now - timedelta(hours=5),
+            target="gateway",
+            target_host="10.8.0.1",
+            samples_sent=55,
+            samples_received=55,
+            loss_percent=0.0,
         )
     )
     db_session.add(
@@ -191,8 +235,20 @@ def test_tunnel_metrics_mixed_points_and_events(
     assert body["points"][2]["gateway_ping_loss_percent"] == 25.0
     assert body["points"][2]["download_mbps"] == 91.2
     assert body["points"][2]["download_cached"] is True
+    assert body["points"][2]["google_probe_ok"] is True
+    assert body["points"][2]["google_probe_latency_ms"] == 210.0
+    assert body["latest"]["google_probe_ok"] is True
+    assert body["latest"]["google_probe_latency_ms"] == 210.0
     assert [event["event_type"] for event in body["events"]] == ["tunnel_down", "tunnel_up"]
     assert all(event.get("id") for event in body["events"])
+    assert len(body["ping_samples"]) == 2
+    gateway_sample = next(s for s in body["ping_samples"] if s["target"] == "gateway")
+    internet_sample = next(s for s in body["ping_samples"] if s["target"] == "internet")
+    assert gateway_sample["avg_ms"] == 34.2
+    assert gateway_sample["max_ms"] == 88.7
+    assert gateway_sample["samples_sent"] == 55
+    assert internet_sample["loss_percent"] == 5.45
+    assert internet_sample["target_host"] == "8.8.8.8"
 
 
 def test_tunnel_metrics_unknown_slug(client: TestClient, admin_headers: dict) -> None:
@@ -326,6 +382,8 @@ def test_tunnel_metrics_hours_bounds_and_no_leak(
         "connect_time_ms",
         "exit_ip",
         "probe_latency_ms",
+        "google_probe_ok",
+        "google_probe_latency_ms",
         "gateway_ping_avg_ms",
         "gateway_ping_jitter_ms",
         "gateway_ping_loss_percent",

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from app.models.component_kind import ComponentKind
     from app.models.connection_event import ConnectionEvent
     from app.models.project import Project
+    from app.models.tunnel_ping_sample import TunnelPingSample
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
@@ -73,6 +74,10 @@ class MonitoredComponent(BaseModel[UUID]):
         cascade="all, delete-orphan",
     )
     connection_events: Mapped[list["ConnectionEvent"]] = relationship(
+        back_populates="monitored_component",
+        cascade="all, delete-orphan",
+    )
+    tunnel_ping_samples: Mapped[list["TunnelPingSample"]] = relationship(
         back_populates="monitored_component",
         cascade="all, delete-orphan",
     )

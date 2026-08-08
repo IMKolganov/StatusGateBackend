@@ -32,11 +32,13 @@ from app.services.speed_test_config import (
     resolve_speed_test_memory,
     should_run_speed_test,
 )
+from app.services.tunnel_ping_sampler import TunnelPingSampler
 from app.services.vpn_check_service import (
     RECONNECT_DELAY_SECONDS,
     OpenVpnSessionHandle,
     OpenVpnStartResult,
     is_openvpn_persistent_session_up,
+    resolve_persistent_gateway,
     run_openvpn_persistent_probe,
     start_openvpn_persistent_session,
     stop_openvpn_persistent_session,
@@ -78,7 +80,15 @@ class _PersistentOpenVpnWorker(threading.Thread):
     def run(self) -> None:
         handle: OpenVpnSessionHandle | None = None
         component: MonitoredComponent | None = None
+        sampler: TunnelPingSampler | None = None
         connect_failures = 0
+
+        def stop_sampler() -> None:
+            nonlocal sampler
+            if sampler is not None:
+                sampler.stop()
+                sampler = None
+
         try:
             while not self._stop.is_set():
                 component = self._load_component()
@@ -87,6 +97,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
 
                 try:
                     if handle is None or not is_openvpn_persistent_session_up(handle):
+                        stop_sampler()
                         if handle is not None:
                             self._save_session_event(component, handle, ConnectionEventType.TUNNEL_DOWN.value)
                             stop_openvpn_persistent_session(handle)
@@ -110,6 +121,20 @@ class _PersistentOpenVpnWorker(threading.Thread):
 
                         connect_failures = 0
                         self._save_session_event(component, handle, ConnectionEventType.TUNNEL_UP.value)
+                        # Auxiliary diagnostics — must never take the session loop down.
+                        try:
+                            sampler = TunnelPingSampler(
+                                component.id,
+                                netns=handle.netns,
+                                gateway=resolve_persistent_gateway(handle),
+                            )
+                            sampler.start()
+                        except Exception:
+                            sampler = None
+                            logger.exception(
+                                "Failed to start continuous tunnel ping for component %s",
+                                self._component_id,
+                            )
 
                     speed_test_context = self._build_speed_test_context(component)
                     result = run_openvpn_persistent_probe(
@@ -133,6 +158,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                         _NETNS_PERMISSION_BACKOFF_SECONDS,
                         exc_info=True,
                     )
+                    stop_sampler()
                     if handle is not None:
                         stop_openvpn_persistent_session(handle)
                         handle = None
@@ -151,6 +177,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                         exc,
                         backoff,
                     )
+                    stop_sampler()
                     if handle is not None:
                         stop_openvpn_persistent_session(handle)
                         handle = None
@@ -163,6 +190,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                     if self._stop.wait(backoff):
                         break
         finally:
+            stop_sampler()
             if handle is not None:
                 stop_openvpn_persistent_session(handle)
                 if component is None:
