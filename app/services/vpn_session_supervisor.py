@@ -28,8 +28,8 @@ from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
     extract_last_successful_speed_test,
-    extract_speed_test_from_details,
     pick_staggered_speed_test_component_ids,
+    resolve_speed_test_memory,
     should_run_speed_test,
 )
 from app.services.vpn_check_service import (
@@ -208,22 +208,31 @@ class _PersistentOpenVpnWorker(threading.Thread):
                     )
                 ).all()
             )
-            latest_map = CheckResultRepository(session).latest_by_component_ids(
+            results_repo = CheckResultRepository(session)
+            latest_map = results_repo.latest_by_component_ids(
                 [row.id for row in vpn_components] or [component.id]
             )
             latest = latest_map.get(component.id)
             latest_details = latest.details if latest and isinstance(latest.details, dict) else None
             checked_at = latest.checked_at if latest else None
+            history = None
+            if extract_last_successful_speed_test(latest_details, checked_at=checked_at) is None:
+                history = results_repo.latest_with_meaningful_speed_test(component.id)
+            history_details = history.details if history and isinstance(history.details, dict) else None
+            previous_speed_test, last_successful_speed_test, previous_speed_test_stats = resolve_speed_test_memory(
+                latest_details,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
+            )
             allowed_ids = pick_staggered_speed_test_component_ids(vpn_components, settings, latest_map)
             due = should_run_speed_test(component, settings, latest)
             return SpeedTestRunContext(
                 url_template=effective_speed_test_url_template(component, settings),
                 run_speed_test=due and component.id in allowed_ids,
-                previous_speed_test=extract_speed_test_from_details(latest_details, checked_at=checked_at),
-                last_successful_speed_test=extract_last_successful_speed_test(
-                    latest_details,
-                    checked_at=checked_at,
-                ),
+                previous_speed_test=previous_speed_test,
+                last_successful_speed_test=last_successful_speed_test,
+                previous_speed_test_stats=previous_speed_test_stats,
             )
 
     def _persist_result(self, component: MonitoredComponent, result: CheckResult) -> None:
@@ -391,6 +400,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
             run_speed_test=False,
             previous_speed_test=built.previous_speed_test,
             last_successful_speed_test=built.last_successful_speed_test,
+            previous_speed_test_stats=built.previous_speed_test_stats,
         )
         result = run_openvpn_persistent_probe(
             component,

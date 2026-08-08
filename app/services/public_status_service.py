@@ -1,5 +1,6 @@
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.cqrs.common import PaginationParams
 from app.cqrs.queries.projects import ProjectQueryHandler
 from app.models.check_result import CheckResult
+from app.models.connection_event import ConnectionEvent
 from app.models.enums import CheckOutcome, IncidentUpdateStatus
 from app.models.incident import Incident
 from app.models.incident_update import IncidentUpdate
@@ -24,6 +26,9 @@ from app.schemas.public_status import (
     PublicServiceStatus,
     PublicServiceTimeline,
     PublicSystemStatus,
+    PublicTunnelConnectionEvent,
+    PublicTunnelMetricPoint,
+    PublicTunnelMetrics,
 )
 from app.services.uptime_stats import (
     DayCheckStats,
@@ -112,6 +117,91 @@ class PublicStatusService:
             slug=project.slug,
             description=project.description,
             services=services,
+        )
+
+    def get_tunnel_metrics(
+        self,
+        project_slug: str,
+        service_slug: str,
+        *,
+        hours: int = 2,
+    ) -> PublicTunnelMetrics:
+        hours = max(2, min(int(hours), 24))
+        project = self._project_queries.get_by_slug(project_slug)
+        if project is None or not project.is_active:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+        component = self._session.scalar(
+            select(MonitoredComponent)
+            .where(
+                MonitoredComponent.project_id == project.id,
+                MonitoredComponent.slug == service_slug,
+                MonitoredComponent.is_active.is_(True),
+            )
+            .options(selectinload(MonitoredComponent.component_kind))
+        )
+        if component is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+
+        range_end = datetime.now(UTC)
+        range_start = range_end - timedelta(hours=hours)
+
+        check_rows = self._session.scalars(
+            select(CheckResult)
+            .where(
+                CheckResult.monitored_component_id == component.id,
+                CheckResult.checked_at >= range_start,
+                CheckResult.checked_at <= range_end,
+            )
+            .order_by(CheckResult.checked_at.asc())
+        ).all()
+
+        points: list[PublicTunnelMetricPoint] = []
+        for row in check_rows:
+            ping_avg, ping_jitter, ping_loss = _gateway_ping_fields(
+                row.details if isinstance(row.details, dict) else None
+            )
+            points.append(
+                PublicTunnelMetricPoint(
+                    checked_at=row.checked_at,
+                    outcome=row.outcome,
+                    latency_ms=row.latency_ms,
+                    gateway_ping_avg_ms=ping_avg,
+                    gateway_ping_jitter_ms=ping_jitter,
+                    gateway_ping_loss_percent=ping_loss,
+                )
+            )
+
+        event_rows = self._session.scalars(
+            select(ConnectionEvent)
+            .where(
+                ConnectionEvent.monitored_component_id == component.id,
+                ConnectionEvent.occurred_at >= range_start,
+                ConnectionEvent.occurred_at <= range_end,
+            )
+            .order_by(ConnectionEvent.occurred_at.asc(), ConnectionEvent.id.asc())
+        ).all()
+        events = [
+            PublicTunnelConnectionEvent(
+                occurred_at=event.occurred_at,
+                event_type=event.event_type,
+                outcome=event.outcome,
+                message=event.message,
+            )
+            for event in event_rows
+        ]
+
+        return PublicTunnelMetrics(
+            project_slug=project.slug,
+            service_id=component.id,
+            service_name=component.name,
+            service_slug=component.slug,
+            component_kind=component.component_kind.name,
+            range_start=range_start,
+            range_end=range_end,
+            hours=hours,
+            points=points,
+            events=events,
         )
 
     def get_system_status(self, slug: str, *, end: date | None = None, days: int = 90) -> PublicSystemStatus:
@@ -427,6 +517,33 @@ class PublicStatusService:
             )
 
         return alerts
+
+
+def _gateway_ping_fields(
+    details: dict[str, Any] | None,
+) -> tuple[float | None, float | None, float | None]:
+    if not isinstance(details, dict):
+        return None, None, None
+    network = details.get("network")
+    if not isinstance(network, dict):
+        return None, None, None
+    ping = network.get("gateway_ping")
+    if not isinstance(ping, dict):
+        return None, None, None
+
+    def _as_float(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    return (
+        _as_float(ping.get("avg_ms")),
+        _as_float(ping.get("jitter_ms")),
+        _as_float(ping.get("loss_percent")),
+    )
 
 
 def _date_range(start: date, end: date) -> list[date]:

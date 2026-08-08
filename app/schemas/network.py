@@ -28,3 +28,7 @@ class NetworkSummary(BaseModel):
     speed_test_measured_at: str | None = None
     speed_test_last_success_at: str | None = None
     speed_test_showing_last_success: bool | None = None
+    speed_test_min_mbps: float | None = None
+    speed_test_max_mbps: float | None = None
+    speed_test_avg_mbps: float | None = None
+    speed_test_sample_count: int | None = None

@@ -117,22 +117,25 @@ class TestSpeedTestConfig:
 
         settings = _settings(default_speed_test_interval_seconds=3600)
         components = [_vpn_component(slug=f"vpn-{i}") for i in range(4)]
-        measured_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        hour_a = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        hour_b = datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+        measured_at = (hour_a - timedelta(hours=3)).isoformat()
         latest_by_id = {
             component.id: CheckResult(
                 monitored_component_id=component.id,
-                checked_at=datetime.now(UTC) - timedelta(seconds=10),
+                checked_at=hour_a - timedelta(seconds=10),
                 outcome="up",
                 details={"network": {"speed_test": {"ok": True, "measured_at": measured_at}}},
             )
             for component in components
         }
-        hour_a = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
-        hour_b = datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
         ids = [component.id for component in components]
-        order_a = sorted(ids, key=lambda component_id: speed_test_stagger_key(component_id, now=hour_a))
-        order_b = sorted(ids, key=lambda component_id: speed_test_stagger_key(component_id, now=hour_b))
-        assert order_a != order_b
+        # Hourly salt must change each component's sort key (order of the whole set may still collide).
+        assert any(
+            speed_test_stagger_key(component_id, now=hour_a)
+            != speed_test_stagger_key(component_id, now=hour_b)
+            for component_id in ids
+        )
 
         first_a = next(
             iter(pick_staggered_speed_test_component_ids(components, settings, latest_by_id, now=hour_a, limit=1))
@@ -140,8 +143,185 @@ class TestSpeedTestConfig:
         first_b = next(
             iter(pick_staggered_speed_test_component_ids(components, settings, latest_by_id, now=hour_b, limit=1))
         )
+        order_a = sorted(ids, key=lambda component_id: speed_test_stagger_key(component_id, now=hour_a))
+        order_b = sorted(ids, key=lambda component_id: speed_test_stagger_key(component_id, now=hour_b))
         assert first_a == order_a[0]
         assert first_b == order_b[0]
+
+    def test_is_meaningful_speed_test_success_rejects_zero_download(self) -> None:
+        from app.services.speed_test_config import is_meaningful_speed_test_success
+
+        assert is_meaningful_speed_test_success({"ok": True, "bytes": 10485760, "mbps": 91.2}) is True
+        assert is_meaningful_speed_test_success({"ok": True, "bytes": 0, "mbps": 0.0}) is False
+        assert is_meaningful_speed_test_success({"ok": True, "bytes": 100, "mbps": 0.0}) is False
+        assert is_meaningful_speed_test_success({"ok": False, "bytes": 0}) is False
+
+    def test_pick_display_rejects_zero_mbps_success(self) -> None:
+        from app.services.speed_test_config import pick_display_speed_test
+
+        displayed = pick_display_speed_test(
+            {"ok": True, "bytes": 0, "mbps": 0.0, "cached": True},
+            {"ok": True, "bytes": 10485760, "mbps": 114.6, "measured_at": "2026-07-20T00:00:00+00:00"},
+        )
+        assert displayed is not None
+        assert displayed["mbps"] == 114.6
+        assert displayed.get("stale") is True
+
+        failed = pick_display_speed_test({"ok": True, "bytes": 0, "mbps": 0.0}, None)
+        assert failed is not None
+        assert failed["ok"] is False
+        assert "no data" in str(failed.get("error", "")).lower()
+
+    def test_update_speed_test_stats_tracks_min_max_avg(self) -> None:
+        from app.services.speed_test_config import update_speed_test_stats
+
+        first = update_speed_test_stats(None, mbps=100.0)
+        assert first == {"min_mbps": 100.0, "max_mbps": 100.0, "avg_mbps": 100.0, "sample_count": 1}
+        second = update_speed_test_stats(first, mbps=50.0)
+        assert second["min_mbps"] == 50.0
+        assert second["max_mbps"] == 100.0
+        assert second["avg_mbps"] == 75.0
+        assert second["sample_count"] == 2
+        third = update_speed_test_stats(second, mbps=150.0)
+        assert third["min_mbps"] == 50.0
+        assert third["max_mbps"] == 150.0
+        assert third["avg_mbps"] == 100.0
+        assert third["sample_count"] == 3
+
+    def test_update_speed_test_stats_handles_varied_sequences(self) -> None:
+        from app.services.speed_test_config import update_speed_test_stats
+
+        values = [12.5, 91.88, 0.01, 200.0, 45.3, 45.3]
+        stats = None
+        for value in values:
+            stats = update_speed_test_stats(stats, mbps=value)
+        assert stats is not None
+        assert stats["min_mbps"] == 0.01
+        assert stats["max_mbps"] == 200.0
+        assert stats["sample_count"] == 6
+        assert stats["avg_mbps"] == round(sum(values) / len(values), 2)
+
+    def test_extract_speed_test_stats_reads_and_seeds(self) -> None:
+        from app.services.speed_test_config import extract_speed_test_stats
+
+        explicit = extract_speed_test_stats(
+            {
+                "network": {
+                    "speed_test_stats": {
+                        "min_mbps": 40.0,
+                        "max_mbps": 120.0,
+                        "avg_mbps": 80.0,
+                        "sample_count": 3,
+                    }
+                }
+            }
+        )
+        assert explicit == {
+            "min_mbps": 40.0,
+            "max_mbps": 120.0,
+            "avg_mbps": 80.0,
+            "sample_count": 3,
+        }
+
+        seeded = extract_speed_test_stats(
+            {
+                "network": {
+                    "speed_test_last_success": {
+                        "ok": True,
+                        "bytes": 10485760,
+                        "mbps": 114.6,
+                    }
+                }
+            }
+        )
+        assert seeded == {
+            "min_mbps": 114.6,
+            "max_mbps": 114.6,
+            "avg_mbps": 114.6,
+            "sample_count": 1,
+        }
+        assert extract_speed_test_stats(
+            {
+                "network": {
+                    "speed_test_last_success": {"ok": True, "bytes": 1, "mbps": 0.0},
+                }
+            }
+        ) is None
+        assert extract_speed_test_stats(
+            {
+                "network": {
+                    "speed_test_stats": {
+                        "min_mbps": 10,
+                        "max_mbps": 5,
+                        "avg_mbps": 7,
+                        "sample_count": 2,
+                    }
+                }
+            }
+        ) is None
+
+    def test_resolve_speed_test_memory_recovers_after_empty_down(self) -> None:
+        from app.services.speed_test_config import resolve_speed_test_memory
+
+        history = {
+            "network": {
+                "speed_test": {
+                    "ok": True,
+                    "bytes": 10485760,
+                    "mbps": 14.76,
+                    "measured_at": "2026-08-03T11:19:01.577624+00:00",
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "bytes": 10485760,
+                    "mbps": 14.76,
+                    "measured_at": "2026-08-03T11:19:01.577624+00:00",
+                },
+                "speed_test_stats": {
+                    "min_mbps": 7.91,
+                    "max_mbps": 20.01,
+                    "avg_mbps": 14.76,
+                    "sample_count": 4,
+                },
+            }
+        }
+        # Latest is a tunnel-down row (or deferred placeholder with no carry-forward).
+        latest_down = {"network": {"connect_time_ms": 511}}
+        previous, last_success, stats = resolve_speed_test_memory(
+            latest_down,
+            latest_checked_at=datetime(2026, 8, 4, 20, 20, 44, tzinfo=UTC),
+            history_details=history,
+            history_checked_at=datetime(2026, 8, 4, 20, 19, 39, tzinfo=UTC),
+        )
+        assert previous is None
+        assert last_success is not None
+        assert last_success["mbps"] == 14.76
+        assert stats == {
+            "min_mbps": 7.91,
+            "max_mbps": 20.01,
+            "avg_mbps": 14.76,
+            "sample_count": 4,
+        }
+
+        latest_deferred = {
+            "network": {
+                "speed_test": {
+                    "ok": False,
+                    "error": "Speed test deferred (waiting for a free slot among VPN services)",
+                    "deferred": True,
+                }
+            }
+        }
+        previous, last_success, stats = resolve_speed_test_memory(
+            latest_deferred,
+            history_details=history,
+            history_checked_at=datetime(2026, 8, 4, 20, 19, 39, tzinfo=UTC),
+        )
+        assert previous is not None
+        assert previous.get("deferred") is True
+        assert last_success is not None
+        assert last_success["mbps"] == 14.76
+        assert stats["sample_count"] == 4
 
     def test_should_run_speed_test_when_previous_was_cached(self) -> None:
         component = _vpn_component(speed_test_interval_seconds=3600)

@@ -22,9 +22,12 @@ from app.schemas.network import NetworkSummary
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     build_speed_test_url,
+    extract_speed_test_stats,
+    is_meaningful_speed_test_success,
     pick_display_speed_test,
     stamp_speed_test_measured_at,
     try_acquire_speed_test_slot,
+    update_speed_test_stats,
 )
 from app.services.vpn_netns import (
     delete_netns,
@@ -737,11 +740,29 @@ def _enrich_network_metrics(
     )
     if speed:
         speed = stamp_speed_test_measured_at(speed)
+        if speed.get("ok") is True and not is_meaningful_speed_test_success(speed):
+            speed = {
+                **speed,
+                "ok": False,
+                "error": "Speed test downloaded no data",
+            }
         network["speed_test"] = speed
-        if speed.get("ok"):
+        if is_meaningful_speed_test_success(speed):
             network["speed_test_last_success"] = speed
-        elif speed_test_context.last_successful_speed_test:
-            network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+            try:
+                mbps = float(speed["mbps"])
+            except (KeyError, TypeError, ValueError):
+                mbps = None
+            if mbps is not None and mbps > 0:
+                network["speed_test_stats"] = update_speed_test_stats(
+                    speed_test_context.previous_speed_test_stats,
+                    mbps=mbps,
+                )
+        else:
+            if speed_test_context.last_successful_speed_test:
+                network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+            if speed_test_context.previous_speed_test_stats:
+                network["speed_test_stats"] = speed_test_context.previous_speed_test_stats
     else:
         network["speed_test"] = stamp_speed_test_measured_at(
             {
@@ -752,6 +773,8 @@ def _enrich_network_metrics(
         )
         if speed_test_context.last_successful_speed_test:
             network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+        if speed_test_context.previous_speed_test_stats:
+            network["speed_test_stats"] = speed_test_context.previous_speed_test_stats
 
     if iface and not network.get("mtu"):
         try:
@@ -793,12 +816,14 @@ def _apply_cached_speed_test(
         network["speed_test"] = cached
         if last_success:
             network["speed_test_last_success"] = last_success
-        elif cached.get("ok") is True:
+        elif cached.get("ok") is True and is_meaningful_speed_test_success(cached):
             network["speed_test_last_success"] = {
                 key: value
                 for key, value in cached.items()
                 if key not in {"cached", "deferred", "throttled", "defer_reason", "stale"}
             }
+        if speed_test_context.previous_speed_test_stats:
+            network["speed_test_stats"] = speed_test_context.previous_speed_test_stats
         return
 
     # Always leave a visible placeholder — otherwise deferred VPNs with no history
@@ -815,6 +840,10 @@ def _apply_cached_speed_test(
     }
     if throttled:
         network["speed_test"]["throttled"] = True
+    if speed_test_context.last_successful_speed_test:
+        network["speed_test_last_success"] = speed_test_context.last_successful_speed_test
+    if speed_test_context.previous_speed_test_stats:
+        network["speed_test_stats"] = speed_test_context.previous_speed_test_stats
 
 
 def _ping_host(host: str, *, count: int = 4, timeout: float = 5, netns: str | None = None) -> dict[str, Any] | None:
@@ -915,6 +944,15 @@ def _measure_download_speed(
         megabits = (bytes_read * 8) / 1_000_000
         seconds = duration_ms / 1000
         mbps = round(megabits / seconds, 2) if seconds > 0 else None
+        if bytes_read <= 0:
+            return {
+                "ok": False,
+                "url": url,
+                "bytes": 0,
+                "duration_ms": duration_ms,
+                "mbps": 0.0,
+                "error": "Speed test downloaded no data",
+            }
         return {
             "ok": True,
             "url": url,
@@ -1097,6 +1135,15 @@ def _measure_download_speed_curl(url: str, *, timeout: float, netns: str) -> dic
         megabits = (bytes_read * 8) / 1_000_000
         seconds = duration_ms / 1000
         mbps = round(megabits / seconds, 2) if seconds > 0 else None
+        if bytes_read <= 0:
+            return {
+                "ok": False,
+                "url": url,
+                "bytes": 0,
+                "duration_ms": duration_ms,
+                "mbps": 0.0,
+                "error": "Speed test downloaded no data",
+            }
         return {
             "ok": True,
             "url": url,
@@ -1223,13 +1270,30 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
     )
 
     if speed_test:
-        if speed_test.get("ok") is True:
+        if is_meaningful_speed_test_success(speed_test):
             speed_test_ok = True
+        elif speed_test.get("ok") is True and not is_meaningful_speed_test_success(speed_test):
+            # Legacy / empty download rows used to be marked ok=True with 0 Mbps.
+            speed_test_ok = False
+            speed_test_error = _format_speed_test_error(
+                speed_test.get("error") or "Speed test downloaded no data"
+            )
+            download_mbps = None
+            download_bytes = speed_test.get("bytes")
+            download_duration_ms = speed_test.get("duration_ms")
+            if is_meaningful_speed_test_success(last_success):
+                download_mbps = last_success.get("mbps")
+                download_bytes = last_success.get("bytes")
+                download_duration_ms = last_success.get("duration_ms")
+                speed_test_ok = True
+                showing_last_success = True
+                if isinstance(last_success.get("measured_at"), str):
+                    last_success_at = last_success.get("measured_at")
         elif speed_test.get("ok") is False:
             speed_test_ok = False
             raw_error = speed_test.get("error")
             speed_test_error = _format_speed_test_error(raw_error) if raw_error else "Speed test failed"
-            if last_success.get("mbps") is not None:
+            if is_meaningful_speed_test_success(last_success):
                 download_mbps = last_success.get("mbps")
                 download_bytes = last_success.get("bytes")
                 download_duration_ms = last_success.get("duration_ms")
@@ -1237,7 +1301,7 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
                 showing_last_success = True
                 if not last_success_at and isinstance(last_success.get("measured_at"), str):
                     last_success_at = last_success.get("measured_at")
-        elif speed_test.get("stale") and speed_test.get("mbps") is not None:
+        elif speed_test.get("stale") and is_meaningful_speed_test_success({**speed_test, "ok": True}):
             speed_test_ok = True
             showing_last_success = True
             download_mbps = speed_test.get("mbps")
@@ -1245,7 +1309,10 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
             download_duration_ms = speed_test.get("duration_ms")
             if not last_success_at and isinstance(speed_test.get("measured_at"), str):
                 last_success_at = speed_test.get("measured_at")
-        if speed_test.get("cached") and speed_test.get("ok") is True:
+        if (
+            is_meaningful_speed_test_success(speed_test)
+            and speed_test.get("cached")
+        ):
             showing_last_success = showing_last_success or bool(
                 speed_test.get("stale")
                 or speed_test.get("throttled")
@@ -1257,13 +1324,14 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
     if showing_last_success and not last_success_at and isinstance(measured_at, str):
         last_success_at = measured_at
     if (
-        speed_test.get("ok") is True
+        is_meaningful_speed_test_success(speed_test)
         and not last_success_at
         and isinstance(measured_at, str)
         and not speed_test.get("cached")
     ):
         last_success_at = measured_at
 
+    stats = extract_speed_test_stats({"network": network})
     summary = NetworkSummary(
         interface=network.get("interface"),
         ipv4_address=network.get("ipv4_address"),
@@ -1287,6 +1355,10 @@ def public_network_summary(details: dict[str, Any] | None) -> NetworkSummary | N
         speed_test_measured_at=measured_at if isinstance(measured_at, str) else None,
         speed_test_last_success_at=last_success_at if isinstance(last_success_at, str) else None,
         speed_test_showing_last_success=showing_last_success or None,
+        speed_test_min_mbps=stats.get("min_mbps") if stats else None,
+        speed_test_max_mbps=stats.get("max_mbps") if stats else None,
+        speed_test_avg_mbps=stats.get("avg_mbps") if stats else None,
+        speed_test_sample_count=stats.get("sample_count") if stats else None,
     )
     if summary.model_dump(exclude_none=True):
         return summary

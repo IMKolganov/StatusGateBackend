@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.orm import Session
 
@@ -17,8 +17,8 @@ from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
     extract_last_successful_speed_test,
-    extract_speed_test_from_details,
     pick_staggered_speed_test_component_ids,
+    resolve_speed_test_memory,
     should_run_speed_test,
 )
 
@@ -88,6 +88,32 @@ class CheckResultRepository:
         )
         results = self._session.scalars(stmt).all()
         return {result.monitored_component_id: result for result in results}
+
+    def latest_with_meaningful_speed_test(
+        self,
+        component_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> CheckResult | None:
+        """Most recent check that still carries a usable speed-test success (skips empty downs)."""
+        stmt = (
+            select(CheckResult)
+            .where(CheckResult.monitored_component_id == component_id)
+            .where(CheckResult.details.is_not(None))
+            .where(
+                or_(
+                    CheckResult.details.contains({"network": {"speed_test_last_success": {"ok": True}}}),
+                    CheckResult.details.contains({"network": {"speed_test": {"ok": True}}}),
+                )
+            )
+            .order_by(CheckResult.checked_at.desc())
+            .limit(limit)
+        )
+        for row in self._session.scalars(stmt).all():
+            details = row.details if isinstance(row.details, dict) else None
+            if extract_last_successful_speed_test(details, checked_at=row.checked_at):
+                return row
+        return None
 
     def count_for_component(self, component_id: UUID) -> int:
         stmt = select(func.count()).select_from(CheckResult).where(
@@ -202,10 +228,15 @@ class HealthCheckRunner:
             latest = latest_map.get(component.id)
             latest_details = latest.details if latest and isinstance(latest.details, dict) else None
             checked_at = latest.checked_at if latest else None
-            previous_speed_test = extract_speed_test_from_details(latest_details, checked_at=checked_at)
-            last_successful_speed_test = extract_last_successful_speed_test(
+            history = None
+            if extract_last_successful_speed_test(latest_details, checked_at=checked_at) is None:
+                history = self._results_repo.latest_with_meaningful_speed_test(component.id)
+            history_details = history.details if history and isinstance(history.details, dict) else None
+            previous_speed_test, last_successful_speed_test, previous_speed_test_stats = resolve_speed_test_memory(
                 latest_details,
-                checked_at=checked_at,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
             )
             due = should_run_speed_test(component, settings, latest)
             if speed_test_allowed_ids is None:
@@ -217,6 +248,7 @@ class HealthCheckRunner:
                 run_speed_test=run_speed,
                 previous_speed_test=previous_speed_test,
                 last_successful_speed_test=last_successful_speed_test,
+                previous_speed_test_stats=previous_speed_test_stats,
             )
         result = run_health_check(component, speed_test_context=speed_test_context)
         component.last_checked_at = result.checked_at

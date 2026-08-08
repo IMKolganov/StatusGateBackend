@@ -89,3 +89,32 @@ class PublicSystemStatus(BaseModel):
     days: int
     groups: list[PublicComponentGroupTimeline]
     active_alerts: list[PublicActiveAlert] = []
+
+
+class PublicTunnelMetricPoint(BaseModel):
+    checked_at: datetime
+    outcome: str
+    latency_ms: int | None = None
+    gateway_ping_avg_ms: float | None = None
+    gateway_ping_jitter_ms: float | None = None
+    gateway_ping_loss_percent: float | None = None
+
+
+class PublicTunnelConnectionEvent(BaseModel):
+    occurred_at: datetime
+    event_type: str
+    outcome: str | None = None
+    message: str | None = None
+
+
+class PublicTunnelMetrics(BaseModel):
+    project_slug: str
+    service_id: UUID
+    service_name: str
+    service_slug: str
+    component_kind: str
+    range_start: datetime
+    range_end: datetime
+    hours: int
+    points: list[PublicTunnelMetricPoint]
+    events: list[PublicTunnelConnectionEvent] = []

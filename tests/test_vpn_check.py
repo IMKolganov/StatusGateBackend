@@ -112,6 +112,10 @@ class TestVpnHelpers:
             download_duration_ms=800,
             speed_test_ok=True,
             speed_test_error=None,
+            speed_test_min_mbps=5.24,
+            speed_test_max_mbps=5.24,
+            speed_test_avg_mbps=5.24,
+            speed_test_sample_count=1,
         )
 
     def test_public_network_summary_failed_speed_test(self) -> None:
@@ -215,6 +219,85 @@ class TestVpnHelpers:
         assert summary.speed_test_showing_last_success is True
         assert summary.speed_test_last_success_at == "2026-07-20T00:10:00+00:00"
         assert summary.speed_test_measured_at == "2026-07-20T00:10:00+00:00"
+
+    def test_public_network_summary_rejects_zero_mbps_cached_success(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": True,
+                    "mbps": 0.0,
+                    "bytes": 0,
+                    "duration_ms": 1200,
+                    "cached": True,
+                    "deferred": True,
+                    "measured_at": "2026-07-27T17:00:00+00:00",
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "mbps": 0.0,
+                    "bytes": 0,
+                    "duration_ms": 1200,
+                    "measured_at": "2026-07-27T17:00:00+00:00",
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps is None
+        assert summary.speed_test_ok is False
+        assert summary.speed_test_showing_last_success is not True
+        assert summary.speed_test_error == "Speed test downloaded no data"
+
+    def test_public_network_summary_includes_speed_stats(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": True,
+                    "mbps": 114.6,
+                    "bytes": 10485760,
+                    "duration_ms": 800,
+                    "measured_at": "2026-07-27T17:00:00+00:00",
+                },
+                "speed_test_stats": {
+                    "min_mbps": 80.1,
+                    "max_mbps": 135.3,
+                    "avg_mbps": 97.4,
+                    "sample_count": 4,
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.speed_test_min_mbps == 80.1
+        assert summary.speed_test_max_mbps == 135.3
+        assert summary.speed_test_avg_mbps == 97.4
+        assert summary.speed_test_sample_count == 4
+
+    def test_public_network_summary_seeds_stats_from_last_success(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": False,
+                    "error": "Speed test deferred (waiting for a free slot among VPN services)",
+                    "deferred": True,
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "mbps": 91.88,
+                    "bytes": 10485760,
+                    "duration_ms": 913,
+                    "measured_at": "2026-07-27T16:10:12+00:00",
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps == 91.88
+        assert summary.speed_test_showing_last_success is True
+        assert summary.speed_test_min_mbps == 91.88
+        assert summary.speed_test_max_mbps == 91.88
+        assert summary.speed_test_avg_mbps == 91.88
+        assert summary.speed_test_sample_count == 1
 
     def test_format_speed_test_error_from_httpx_message(self) -> None:
         raw = (
