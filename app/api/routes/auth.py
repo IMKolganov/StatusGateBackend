@@ -6,7 +6,12 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_auth_service, get_current_account, get_db
-from app.auth.cookies import clear_auth_cookies, get_refresh_token_from_request, set_auth_cookies
+from app.auth.cookies import (
+    clear_auth_cookies,
+    get_access_token_from_request,
+    get_refresh_token_from_request,
+    set_auth_cookies,
+)
 from app.auth.google_token import verify_google_id_token
 from app.config import settings
 from app.cqrs.queries.accounts import AccountQueryHandler
@@ -129,9 +134,15 @@ def logout(request: Request, auth_service: AuthService = Depends(get_auth_servic
 
 @router.get("/me", response_model=AccountResponse)
 def me(
-    account: Account = Depends(get_current_account),
+    request: Request,
     auth_service: AuthService = Depends(get_auth_service),
-) -> AccountResponse:
+) -> AccountResponse | Response:
+    # Anonymous visitors have no access cookie — return 204 so the browser
+    # does not log a noisy 401 on every public page load.
+    token = get_access_token_from_request(request)
+    if not token:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    account = auth_service.get_account_from_access_token(token)
     return auth_service.to_account_response(account)
 
 
