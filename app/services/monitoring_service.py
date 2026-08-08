@@ -16,6 +16,7 @@ from app.services.health_check_service import run_health_check
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
+    extract_last_live_speed_test_from_details,
     extract_last_successful_speed_test,
     pick_staggered_speed_test_component_ids,
     resolve_speed_test_memory,
@@ -238,6 +239,9 @@ class HealthCheckRunner:
                 history_details=history_details,
                 history_checked_at=history.checked_at if history else None,
             )
+            last_live_speed_test = extract_last_live_speed_test_from_details(
+                latest_details, checked_at=checked_at
+            )
             due = should_run_speed_test(component, settings, latest)
             if speed_test_allowed_ids is None:
                 run_speed = due
@@ -249,6 +253,7 @@ class HealthCheckRunner:
                 previous_speed_test=previous_speed_test,
                 last_successful_speed_test=last_successful_speed_test,
                 previous_speed_test_stats=previous_speed_test_stats,
+                last_live_speed_test=last_live_speed_test,
             )
         result = run_health_check(component, speed_test_context=speed_test_context)
         component.last_checked_at = result.checked_at

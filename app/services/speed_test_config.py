@@ -28,6 +28,8 @@ class SpeedTestRunContext:
     previous_speed_test: dict[str, Any] | None = None
     last_successful_speed_test: dict[str, Any] | None = None
     previous_speed_test_stats: dict[str, Any] | None = None
+    # Last non-cached attempt (success or 429) — carried across deferred rows for scheduling.
+    last_live_speed_test: dict[str, Any] | None = None
 
     @classmethod
     def default(cls) -> SpeedTestRunContext:
@@ -101,6 +103,37 @@ def _is_live_speed_test_row(speed_test: dict[str, Any]) -> bool:
         or speed_test.get("throttled")
         or speed_test.get("stale")
     )
+
+
+def _is_deferred_speed_test_row(speed_test: dict[str, Any]) -> bool:
+    return bool(speed_test.get("cached") or speed_test.get("deferred") or speed_test.get("throttled"))
+
+
+def extract_last_live_speed_test_from_details(
+    details: dict[str, Any] | None,
+    *,
+    checked_at: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Last real (non-cached) speed-test attempt used for interval / 429 backoff scheduling.
+
+    Prefers ``network.speed_test_last_attempt`` (preserved when a later cycle writes a
+    cached display row), then a live ``network.speed_test``. Cached-only rows return None
+    so the caller can fall back to the cached ``measured_at`` when present.
+    """
+    if not isinstance(details, dict):
+        return None
+    network = details.get("network")
+    if not isinstance(network, dict):
+        return None
+
+    last_attempt = network.get("speed_test_last_attempt")
+    if isinstance(last_attempt, dict) and _is_live_speed_test_row(last_attempt):
+        return hydrate_speed_test_measured_at(last_attempt, checked_at=checked_at)
+
+    speed_test = network.get("speed_test")
+    if isinstance(speed_test, dict) and _is_live_speed_test_row(speed_test):
+        return hydrate_speed_test_measured_at(speed_test, checked_at=checked_at)
+    return None
 
 
 def is_meaningful_speed_test_success(speed_test: dict[str, Any] | None) -> bool:
@@ -347,27 +380,39 @@ def should_run_speed_test(
         return True
 
     details = latest_result.details if isinstance(latest_result.details, dict) else None
-    previous = extract_speed_test_from_details(details)
+    checked_at = latest_result.checked_at
+    previous = extract_speed_test_from_details(details, checked_at=checked_at)
     if previous is None:
         return True
 
-    # Cached/throttled rows are not a fresh live attempt — keep trying until we measure.
-    if previous.get("cached") or previous.get("deferred") or previous.get("throttled"):
-        return True
+    # Schedule from the last REAL attempt (live row or preserved last_attempt), not from a
+    # cached display row that would otherwise short-circuit the interval / 429 backoff.
+    scheduling = extract_last_live_speed_test_from_details(details, checked_at=checked_at)
+    if scheduling is None and _is_deferred_speed_test_row(previous):
+        # Cached/deferred/throttled carrying measured_at from the last live success —
+        # still honor the interval. No timestamp → never measured live → stay due.
+        if parse_speed_test_measured_at(previous) is None:
+            return True
+        scheduling = previous
+    if scheduling is None:
+        scheduling = previous
 
     # Zero-byte "success" must not satisfy the interval — retry immediately.
-    if previous.get("ok") is True and not is_meaningful_speed_test_success(previous):
+    if (
+        _is_live_speed_test_row(scheduling)
+        and scheduling.get("ok") is True
+        and not is_meaningful_speed_test_success(scheduling)
+    ):
         return True
 
-    retry_after = effective_speed_test_retry_seconds(component, settings, previous)
+    retry_after = effective_speed_test_retry_seconds(component, settings, scheduling)
     if retry_after <= 0:
         return True
 
     current = now or datetime.now(UTC)
-    measured_at = parse_speed_test_measured_at(previous)
+    measured_at = parse_speed_test_measured_at(scheduling)
     if measured_at is None:
-        # Legacy rows without measured_at: fall back to check time once.
-        checked_at = latest_result.checked_at
+        # Legacy live rows without measured_at: fall back to check time once.
         if checked_at.tzinfo is None:
             checked_at = checked_at.replace(tzinfo=UTC)
         measured_at = checked_at
@@ -398,8 +443,11 @@ def pick_staggered_speed_test_component_ids(
         if not should_run_speed_test(component, settings, latest, now=current):
             continue
         details = latest.details if latest and isinstance(latest.details, dict) else None
-        previous = extract_speed_test_from_details(details)
-        measured_at = parse_speed_test_measured_at(previous) or datetime.min.replace(tzinfo=UTC)
+        checked_at = latest.checked_at if latest else None
+        scheduling = extract_last_live_speed_test_from_details(details, checked_at=checked_at)
+        if scheduling is None:
+            scheduling = extract_speed_test_from_details(details, checked_at=checked_at)
+        measured_at = parse_speed_test_measured_at(scheduling) or datetime.min.replace(tzinfo=UTC)
         due.append((measured_at, speed_test_stagger_key(component.id, now=current), component.id))
     due.sort(key=lambda item: (item[0], item[1]))
     return {component_id for _, _, component_id in due[: max(limit, 0)]}

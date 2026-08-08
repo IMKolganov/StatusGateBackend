@@ -27,6 +27,7 @@ from app.services.monitoring_service import CheckResultRepository, HealthCheckRu
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
+    extract_last_live_speed_test_from_details,
     extract_last_successful_speed_test,
     pick_staggered_speed_test_component_ids,
     resolve_speed_test_memory,
@@ -253,6 +254,9 @@ class _PersistentOpenVpnWorker(threading.Thread):
                 history_details=history_details,
                 history_checked_at=history.checked_at if history else None,
             )
+            last_live_speed_test = extract_last_live_speed_test_from_details(
+                latest_details, checked_at=checked_at
+            )
             allowed_ids = pick_staggered_speed_test_component_ids(vpn_components, settings, latest_map)
             due = should_run_speed_test(component, settings, latest)
             return SpeedTestRunContext(
@@ -261,6 +265,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                 previous_speed_test=previous_speed_test,
                 last_successful_speed_test=last_successful_speed_test,
                 previous_speed_test_stats=previous_speed_test_stats,
+                last_live_speed_test=last_live_speed_test,
             )
 
     def _persist_result(self, component: MonitoredComponent, result: CheckResult) -> None:
@@ -429,6 +434,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
             previous_speed_test=built.previous_speed_test,
             last_successful_speed_test=built.last_successful_speed_test,
             previous_speed_test_stats=built.previous_speed_test_stats,
+            last_live_speed_test=built.last_live_speed_test,
         )
         result = run_openvpn_persistent_probe(
             component,

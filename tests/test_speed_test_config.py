@@ -323,7 +323,96 @@ class TestSpeedTestConfig:
         assert last_success["mbps"] == 14.76
         assert stats["sample_count"] == 4
 
-    def test_should_run_speed_test_when_previous_was_cached(self) -> None:
+    def test_should_run_speed_test_cached_previous_respects_interval(self) -> None:
+        """Cached/deferred/throttled previous must NOT reset the interval clock."""
+        component = _vpn_component(speed_test_interval_seconds=3600)
+        settings = _settings(default_speed_test_interval_seconds=3600)
+        measured_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        for flags in (
+            {"cached": True, "deferred": True, "defer_reason": "stagger"},
+            {"cached": True, "deferred": True, "throttled": True, "defer_reason": "slot"},
+        ):
+            latest = CheckResult(
+                monitored_component_id=component.id,
+                checked_at=datetime.now(UTC) - timedelta(seconds=15),
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "mbps": 12.0,
+                            "bytes": 1024,
+                            "measured_at": measured_at,
+                            **flags,
+                        }
+                    }
+                },
+            )
+            assert should_run_speed_test(component, settings, latest) is False
+
+    def test_should_run_speed_test_cached_previous_due_after_interval(self) -> None:
+        component = _vpn_component(speed_test_interval_seconds=300)
+        settings = _settings(default_speed_test_interval_seconds=300)
+        measured_at = (datetime.now(UTC) - timedelta(minutes=6)).isoformat()
+        latest = CheckResult(
+            monitored_component_id=component.id,
+            checked_at=datetime.now(UTC) - timedelta(seconds=15),
+            outcome="up",
+            details={
+                "network": {
+                    "speed_test": {
+                        "ok": True,
+                        "mbps": 80.0,
+                        "bytes": 10485760,
+                        "measured_at": measured_at,
+                        "cached": True,
+                        "deferred": True,
+                        "defer_reason": "stagger",
+                    }
+                }
+            },
+        )
+        assert should_run_speed_test(component, settings, latest) is True
+
+    def test_should_run_speed_test_uses_last_attempt_when_display_is_cached(self) -> None:
+        """After a live 429, a later cached success row must still honor 429 backoff."""
+        component = _vpn_component(speed_test_interval_seconds=60)
+        settings = _settings(default_speed_test_interval_seconds=60)
+        rate_limited_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+        old_success_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        latest = CheckResult(
+            monitored_component_id=component.id,
+            checked_at=datetime.now(UTC) - timedelta(seconds=15),
+            outcome="up",
+            details={
+                "network": {
+                    "speed_test": {
+                        "ok": True,
+                        "mbps": 90.0,
+                        "bytes": 10485760,
+                        "measured_at": old_success_at,
+                        "cached": True,
+                        "deferred": True,
+                        "defer_reason": "stagger",
+                    },
+                    "speed_test_last_attempt": {
+                        "ok": False,
+                        "error": "Speed test rate limited (HTTP 429)",
+                        "measured_at": rate_limited_at,
+                    },
+                    "speed_test_last_success": {
+                        "ok": True,
+                        "mbps": 90.0,
+                        "bytes": 10485760,
+                        "measured_at": old_success_at,
+                    },
+                }
+            },
+        )
+        # 429 backoff is 3600s even when interval is 60s.
+        assert should_run_speed_test(component, settings, latest) is False
+
+    def test_should_run_speed_test_cached_without_measured_at_stays_due(self) -> None:
         component = _vpn_component(speed_test_interval_seconds=3600)
         settings = _settings(default_speed_test_interval_seconds=3600)
         latest = CheckResult(
@@ -336,12 +425,130 @@ class TestSpeedTestConfig:
                         "ok": True,
                         "mbps": 12.0,
                         "cached": True,
-                        "measured_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+                        "deferred": True,
                     }
                 }
             },
         )
         assert should_run_speed_test(component, settings, latest) is True
+
+    def test_pick_staggered_skips_components_still_inside_cached_interval(self) -> None:
+        from app.services.speed_test_config import pick_staggered_speed_test_component_ids
+
+        settings = _settings(default_speed_test_interval_seconds=3600)
+        recent = _vpn_component(slug="recent")
+        stale = _vpn_component(slug="stale")
+        now = datetime.now(UTC)
+        latest_by_id = {
+            recent.id: CheckResult(
+                monitored_component_id=recent.id,
+                checked_at=now - timedelta(seconds=30),
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "mbps": 50.0,
+                            "bytes": 1024,
+                            "measured_at": (now - timedelta(minutes=10)).isoformat(),
+                            "cached": True,
+                            "deferred": True,
+                            "defer_reason": "stagger",
+                        }
+                    }
+                },
+            ),
+            stale.id: CheckResult(
+                monitored_component_id=stale.id,
+                checked_at=now - timedelta(seconds=30),
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "mbps": 40.0,
+                            "bytes": 1024,
+                            "measured_at": (now - timedelta(hours=2)).isoformat(),
+                            "cached": True,
+                            "deferred": True,
+                            "defer_reason": "stagger",
+                        }
+                    }
+                },
+            ),
+        }
+        allowed = pick_staggered_speed_test_component_ids(
+            [recent, stale], settings, latest_by_id, now=now, limit=1
+        )
+        assert allowed == {stale.id}
+
+    def test_scheduler_cycles_respect_interval_across_cached_rows(self) -> None:
+        """Simulate poll cycles: after a live success, cached deferrals stay not-due until interval."""
+        from app.services.speed_test_config import pick_staggered_speed_test_component_ids
+
+        component = _vpn_component(slug="persistent-vpn", speed_test_interval_seconds=300)
+        settings = _settings(default_speed_test_interval_seconds=300)
+        t0 = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+        live_at = t0.isoformat()
+
+        # Cycle 0: live success
+        latest = CheckResult(
+            monitored_component_id=component.id,
+            checked_at=t0,
+            outcome="up",
+            details={
+                "network": {
+                    "speed_test": {
+                        "ok": True,
+                        "mbps": 72.0,
+                        "bytes": 10485760,
+                        "measured_at": live_at,
+                    }
+                }
+            },
+        )
+        assert should_run_speed_test(component, settings, latest, now=t0 + timedelta(seconds=60)) is False
+
+        # Cycles 1..4: deferred/cached rows carrying the same measured_at (+ last_attempt)
+        for minutes in (1, 2, 3, 4):
+            now = t0 + timedelta(minutes=minutes)
+            latest = CheckResult(
+                monitored_component_id=component.id,
+                checked_at=now,
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "mbps": 72.0,
+                            "bytes": 10485760,
+                            "measured_at": live_at,
+                            "cached": True,
+                            "deferred": True,
+                            "defer_reason": "stagger",
+                        },
+                        "speed_test_last_attempt": {
+                            "ok": True,
+                            "mbps": 72.0,
+                            "bytes": 10485760,
+                            "measured_at": live_at,
+                        },
+                    }
+                },
+            )
+            assert should_run_speed_test(component, settings, latest, now=now) is False
+            allowed = pick_staggered_speed_test_component_ids(
+                [component], settings, {component.id: latest}, now=now, limit=1
+            )
+            assert allowed == set()
+
+        # After 5 minutes the component becomes due again
+        now = t0 + timedelta(minutes=5, seconds=1)
+        assert should_run_speed_test(component, settings, latest, now=now) is True
+        allowed = pick_staggered_speed_test_component_ids(
+            [component], settings, {component.id: latest}, now=now, limit=1
+        )
+        assert allowed == {component.id}
 
     def test_hydrate_speed_test_measured_at_for_legacy_live_rows(self) -> None:
         from app.services.speed_test_config import extract_speed_test_from_details

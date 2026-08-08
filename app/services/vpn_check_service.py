@@ -809,6 +809,21 @@ def _apply_cached_speed_test(
     *,
     throttled: bool = False,
 ) -> None:
+    previous = speed_test_context.previous_speed_test
+    last_live = speed_test_context.last_live_speed_test
+    if last_live is None and isinstance(previous, dict) and not (
+        previous.get("cached") or previous.get("deferred") or previous.get("throttled") or previous.get("stale")
+    ):
+        last_live = previous
+    # Preserve the last live attempt (incl. Cloudflare 429) so should_run_speed_test can
+    # honor interval / rate-limit backoff after this deferred row overwrites speed_test.
+    if isinstance(last_live, dict):
+        network["speed_test_last_attempt"] = {
+            key: value
+            for key, value in last_live.items()
+            if key not in {"cached", "deferred", "throttled", "defer_reason", "stale"}
+        }
+
     displayed = pick_display_speed_test(
         speed_test_context.previous_speed_test,
         speed_test_context.last_successful_speed_test,
