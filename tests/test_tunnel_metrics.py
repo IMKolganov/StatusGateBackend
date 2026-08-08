@@ -92,6 +92,8 @@ def test_tunnel_metrics_mixed_points_and_events(
             details={
                 "network": {
                     "gateway_ping": {"avg_ms": 34.5, "jitter_ms": 12.0, "loss_percent": 0.0},
+                    "probe": {"latency_ms": 88.0},
+                    "speed_test": {"ok": True, "mbps": 114.6, "bytes": 12_000_000, "duration_ms": 840},
                 }
             },
         )
@@ -114,7 +116,23 @@ def test_tunnel_metrics_mixed_points_and_events(
             latency_ms=5200,
             details={
                 "network": {
+                    "connect_time_ms": 1400,
                     "gateway_ping": {"avg_ms": 41.2, "jitter_ms": 8.1, "loss_percent": 25.0},
+                    "probe": {"latency_ms": 95.0, "exit_ip": "203.0.113.55", "ok": True},
+                    "speed_test": {
+                        "ok": True,
+                        "mbps": 91.2,
+                        "bytes": 10_000_000,
+                        "duration_ms": 900,
+                        "cached": True,
+                        "deferred": True,
+                    },
+                    "speed_test_stats": {
+                        "min_mbps": 80.0,
+                        "max_mbps": 120.0,
+                        "avg_mbps": 100.0,
+                        "sample_count": 4,
+                    },
                 }
             },
         )
@@ -158,9 +176,21 @@ def test_tunnel_metrics_mixed_points_and_events(
     assert body["hours"] == 2
     assert len(body["points"]) == 3
     assert body["points"][0]["gateway_ping_avg_ms"] == 34.5
+    assert body["points"][0]["probe_latency_ms"] == 88.0
+    assert body["points"][0]["download_mbps"] == 114.6
+    assert body["points"][0]["download_cached"] is False
+    assert body["points"][0]["download_bytes"] == 12_000_000
+    assert body["latest"]["download_mbps"] == 91.2
+    assert body["latest"]["exit_ip"] == "203.0.113.55"
+    assert body["latest"]["fresh_speed_tests_in_window"] == 1
+    assert body["latest"]["uptime_percent"] is not None
+    assert body["latest"]["speed_test_avg_mbps"] == 100.0
     assert body["points"][1]["outcome"] == "down"
     assert body["points"][1]["gateway_ping_avg_ms"] is None
+    assert body["points"][1]["download_mbps"] is None
     assert body["points"][2]["gateway_ping_loss_percent"] == 25.0
+    assert body["points"][2]["download_mbps"] == 91.2
+    assert body["points"][2]["download_cached"] is True
     assert [event["event_type"] for event in body["events"]] == ["tunnel_down", "tunnel_up"]
     assert all(event.get("id") for event in body["events"])
 
@@ -293,13 +323,29 @@ def test_tunnel_metrics_hours_bounds_and_no_leak(
         "checked_at",
         "outcome",
         "latency_ms",
+        "connect_time_ms",
+        "exit_ip",
+        "probe_latency_ms",
         "gateway_ping_avg_ms",
         "gateway_ping_jitter_ms",
         "gateway_ping_loss_percent",
+        "download_mbps",
+        "download_bytes",
+        "download_duration_ms",
+        "download_cached",
+        "speed_test_ok",
+        "speed_test_measured_at",
     }
+    assert "latest" in body
+    latest = body["latest"]
+    assert latest["outcome"] == "down"
+    assert latest["fresh_speed_tests_in_window"] == 0
     raw = ok.text
     assert "SHOULD_NOT_LEAK" not in raw
     assert "secret log" not in raw
     assert "config_text" not in raw
     assert "secret.example.com" not in raw
     assert "check_config" not in body
+    assert "interface" not in latest
+    assert "proxy_url" not in latest
+    assert "ipv4_address" not in latest

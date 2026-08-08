@@ -27,6 +27,7 @@ from app.schemas.public_status import (
     PublicServiceTimeline,
     PublicSystemStatus,
     PublicTunnelConnectionEvent,
+    PublicTunnelLatestDiagnostics,
     PublicTunnelMetricPoint,
     PublicTunnelMetrics,
 )
@@ -158,17 +159,12 @@ class PublicStatusService:
 
         points: list[PublicTunnelMetricPoint] = []
         for row in check_rows:
-            ping_avg, ping_jitter, ping_loss = _gateway_ping_fields(
-                row.details if isinstance(row.details, dict) else None
-            )
             points.append(
-                PublicTunnelMetricPoint(
+                _build_tunnel_metric_point(
                     checked_at=row.checked_at,
                     outcome=row.outcome,
                     latency_ms=row.latency_ms,
-                    gateway_ping_avg_ms=ping_avg,
-                    gateway_ping_jitter_ms=ping_jitter,
-                    gateway_ping_loss_percent=ping_loss,
+                    details=row.details if isinstance(row.details, dict) else None,
                 )
             )
 
@@ -201,6 +197,7 @@ class PublicStatusService:
             range_start=range_start,
             range_end=range_end,
             hours=hours,
+            latest=_build_tunnel_latest_diagnostics(check_rows, points),
             points=points,
             events=events,
         )
@@ -520,30 +517,138 @@ class PublicStatusService:
         return alerts
 
 
-def _gateway_ping_fields(
+def _as_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_tunnel_metric_point(
+    *,
+    checked_at: datetime,
+    outcome: str,
+    latency_ms: int | None,
     details: dict[str, Any] | None,
-) -> tuple[float | None, float | None, float | None]:
-    if not isinstance(details, dict):
-        return None, None, None
-    network = details.get("network")
+) -> PublicTunnelMetricPoint:
+    network = details.get("network") if isinstance(details, dict) else None
     if not isinstance(network, dict):
-        return None, None, None
-    ping = network.get("gateway_ping")
-    if not isinstance(ping, dict):
-        return None, None, None
+        network = {}
 
-    def _as_float(value: object) -> float | None:
-        if value is None:
-            return None
-        try:
-            return float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
+    ping = network.get("gateway_ping") if isinstance(network.get("gateway_ping"), dict) else {}
+    probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
+    speed = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
 
-    return (
-        _as_float(ping.get("avg_ms")),
-        _as_float(ping.get("jitter_ms")),
-        _as_float(ping.get("loss_percent")),
+    download_mbps: float | None = None
+    download_bytes: int | None = None
+    download_duration_ms: int | None = None
+    download_cached: bool | None = None
+    speed_test_ok: bool | None = None
+    measured_at = speed.get("measured_at") if isinstance(speed.get("measured_at"), str) else None
+
+    if speed:
+        if speed.get("ok") is True:
+            speed_test_ok = True
+            mbps = _as_float(speed.get("mbps"))
+            if mbps is not None and mbps > 0:
+                download_mbps = mbps
+                download_bytes = _as_int(speed.get("bytes"))
+                download_duration_ms = _as_int(speed.get("duration_ms"))
+                download_cached = bool(
+                    speed.get("cached") or speed.get("deferred") or speed.get("stale")
+                )
+            else:
+                speed_test_ok = False
+        elif speed.get("ok") is False:
+            speed_test_ok = False
+
+    exit_ip = probe.get("exit_ip")
+    if exit_ip is not None:
+        exit_ip = str(exit_ip)
+
+    return PublicTunnelMetricPoint(
+        checked_at=checked_at,
+        outcome=outcome,
+        latency_ms=latency_ms,
+        connect_time_ms=_as_int(network.get("connect_time_ms")),
+        exit_ip=exit_ip,
+        probe_latency_ms=_as_float(probe.get("latency_ms")),
+        gateway_ping_avg_ms=_as_float(ping.get("avg_ms")),
+        gateway_ping_jitter_ms=_as_float(ping.get("jitter_ms")),
+        gateway_ping_loss_percent=_as_float(ping.get("loss_percent")),
+        download_mbps=download_mbps,
+        download_bytes=download_bytes,
+        download_duration_ms=download_duration_ms,
+        download_cached=download_cached,
+        speed_test_ok=speed_test_ok,
+        speed_test_measured_at=measured_at,
+    )
+
+
+def _build_tunnel_latest_diagnostics(
+    check_rows: list[Any],
+    points: list[PublicTunnelMetricPoint],
+) -> PublicTunnelLatestDiagnostics | None:
+    if not check_rows:
+        return None
+
+    latest_row = check_rows[-1]
+    summary = public_network_summary(
+        latest_row.details if isinstance(latest_row.details, dict) else None
+    )
+
+    healthy = sum(1 for point in points if point.outcome in {"up", "degraded"})
+    uptime_percent = round(100.0 * healthy / len(points), 2) if points else None
+    fresh_speed_tests = sum(
+        1
+        for point in points
+        if point.download_mbps is not None
+        and point.download_mbps > 0
+        and point.download_cached is not True
+    )
+
+    if summary is None:
+        return PublicTunnelLatestDiagnostics(
+            checked_at=latest_row.checked_at,
+            outcome=latest_row.outcome,
+            fresh_speed_tests_in_window=fresh_speed_tests,
+            uptime_percent=uptime_percent,
+        )
+
+    return PublicTunnelLatestDiagnostics(
+        checked_at=latest_row.checked_at,
+        outcome=latest_row.outcome,
+        exit_ip=summary.exit_ip,
+        connect_time_ms=summary.connect_time_ms,
+        probe_latency_ms=_as_float(summary.probe_latency_ms),
+        gateway_ping_avg_ms=summary.gateway_ping_avg_ms,
+        gateway_ping_jitter_ms=summary.gateway_ping_jitter_ms,
+        gateway_ping_loss_percent=summary.gateway_ping_loss_percent,
+        download_mbps=summary.download_mbps,
+        download_bytes=summary.download_bytes,
+        download_duration_ms=summary.download_duration_ms,
+        speed_test_ok=summary.speed_test_ok,
+        speed_test_error=summary.speed_test_error,
+        speed_test_measured_at=summary.speed_test_measured_at,
+        speed_test_last_success_at=summary.speed_test_last_success_at,
+        speed_test_showing_last_success=summary.speed_test_showing_last_success,
+        speed_test_min_mbps=summary.speed_test_min_mbps,
+        speed_test_max_mbps=summary.speed_test_max_mbps,
+        speed_test_avg_mbps=summary.speed_test_avg_mbps,
+        speed_test_sample_count=summary.speed_test_sample_count,
+        fresh_speed_tests_in_window=fresh_speed_tests,
+        uptime_percent=uptime_percent,
     )
 
 

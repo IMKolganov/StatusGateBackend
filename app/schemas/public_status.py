@@ -95,9 +95,45 @@ class PublicTunnelMetricPoint(BaseModel):
     checked_at: datetime
     outcome: str
     latency_ms: int | None = None
+    connect_time_ms: int | None = None
+    exit_ip: str | None = None
+    probe_latency_ms: float | None = None
     gateway_ping_avg_ms: float | None = None
     gateway_ping_jitter_ms: float | None = None
     gateway_ping_loss_percent: float | None = None
+    download_mbps: float | None = None
+    download_bytes: int | None = None
+    download_duration_ms: int | None = None
+    download_cached: bool | None = None
+    speed_test_ok: bool | None = None
+    speed_test_measured_at: str | None = None
+
+
+class PublicTunnelLatestDiagnostics(BaseModel):
+    """Public-safe snapshot of the newest check — full tunnel diagnostics, not ping-only."""
+
+    checked_at: datetime | None = None
+    outcome: str | None = None
+    exit_ip: str | None = None
+    connect_time_ms: int | None = None
+    probe_latency_ms: float | None = None
+    gateway_ping_avg_ms: float | None = None
+    gateway_ping_jitter_ms: float | None = None
+    gateway_ping_loss_percent: float | None = None
+    download_mbps: float | None = None
+    download_bytes: int | None = None
+    download_duration_ms: int | None = None
+    speed_test_ok: bool | None = None
+    speed_test_error: str | None = None
+    speed_test_measured_at: str | None = None
+    speed_test_last_success_at: str | None = None
+    speed_test_showing_last_success: bool | None = None
+    speed_test_min_mbps: float | None = None
+    speed_test_max_mbps: float | None = None
+    speed_test_avg_mbps: float | None = None
+    speed_test_sample_count: int | None = None
+    fresh_speed_tests_in_window: int = 0
+    uptime_percent: float | None = None
 
 
 class PublicTunnelConnectionEvent(BaseModel):
@@ -117,5 +153,6 @@ class PublicTunnelMetrics(BaseModel):
     range_start: datetime
     range_end: datetime
     hours: int
+    latest: PublicTunnelLatestDiagnostics | None = None
     points: list[PublicTunnelMetricPoint]
     events: list[PublicTunnelConnectionEvent] = []
