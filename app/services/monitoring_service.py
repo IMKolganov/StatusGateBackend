@@ -1,8 +1,10 @@
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import cast as sa_cast, delete, func, or_, select, true
+from sqlalchemy.dialects.postgresql import ARRAY, UUID as PG_UUID
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.orm import Session
 
@@ -22,6 +24,44 @@ from app.services.speed_test_config import (
     resolve_speed_test_memory,
     should_run_speed_test,
 )
+
+
+def fetch_latest_check_results(
+    session: Session,
+    component_ids: Sequence[UUID],
+    *,
+    before: datetime | None = None,
+) -> list[CheckResult]:
+    """Latest check per component via LATERAL … LIMIT 1 (index-friendly).
+
+    DISTINCT ON / GROUP BY max(checked_at) scan every matching row; this walks the
+    (monitored_component_id, checked_at) index backward once per id.
+    """
+    if not component_ids:
+        return []
+
+    ids = select(
+        func.unnest(sa_cast(list(component_ids), ARRAY(PG_UUID(as_uuid=True)))).label("component_id")
+    ).subquery("component_ids")
+    filters = [CheckResult.monitored_component_id == ids.c.component_id]
+    if before is not None:
+        filters.append(CheckResult.checked_at < before)
+
+    latest = (
+        select(CheckResult.id)
+        .where(*filters)
+        .order_by(CheckResult.checked_at.desc())
+        .limit(1)
+        .correlate(ids)
+        .lateral()
+        .alias("latest_check")
+    )
+    latest_ids = list(
+        session.scalars(select(latest.c.id).select_from(ids.join(latest, true()))).all()
+    )
+    if not latest_ids:
+        return []
+    return list(session.scalars(select(CheckResult).where(CheckResult.id.in_(latest_ids))).all())
 
 
 class MonitoringSettingsRepository:
@@ -71,23 +111,7 @@ class CheckResultRepository:
         return list(self._session.scalars(stmt).all()), total
 
     def latest_by_component_ids(self, component_ids: list[UUID]) -> dict[UUID, CheckResult]:
-        if not component_ids:
-            return {}
-        subq = (
-            select(
-                CheckResult.monitored_component_id,
-                func.max(CheckResult.checked_at).label("max_checked_at"),
-            )
-            .where(CheckResult.monitored_component_id.in_(component_ids))
-            .group_by(CheckResult.monitored_component_id)
-            .subquery()
-        )
-        stmt = select(CheckResult).join(
-            subq,
-            (CheckResult.monitored_component_id == subq.c.monitored_component_id)
-            & (CheckResult.checked_at == subq.c.max_checked_at),
-        )
-        results = self._session.scalars(stmt).all()
+        results = fetch_latest_check_results(self._session, component_ids)
         return {result.monitored_component_id: result for result in results}
 
     def latest_with_meaningful_speed_test(

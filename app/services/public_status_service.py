@@ -4,7 +4,8 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session, selectinload
 
 from app.cqrs.common import PaginationParams
@@ -33,14 +34,14 @@ from app.schemas.public_status import (
     PublicTunnelMetrics,
     PublicTunnelPingSample,
 )
+from app.services.monitoring_service import fetch_latest_check_results
 from app.services.uptime_stats import (
     DayCheckStats,
-    availability_percent,
+    availability_from_stats,
     compute_downtime_seconds,
-    day_check_counts,
     empty_day_stats,
     is_outage_outcome,
-    status_from_outcomes,
+    status_from_stats,
 )
 from app.services.vpn_check_service import public_network_summary
 
@@ -76,14 +77,14 @@ class PublicStatusService:
             checks_by_component_day = self._day_stats_by_component_day(
                 component_ids, range_start, range_end, include_downtime=False
             )
-            project_outcomes = _collect_outcomes(component_ids, day_keys, checks_by_component_day)
+            project_stats = _sum_stats(component_ids, day_keys, checks_by_component_day)
             summaries.append(
                 PublicProjectSummary(
                     id=project.id,
                     name=project.name,
                     slug=project.slug,
                     description=project.description,
-                    uptime_percent=_uptime_percent_from_outcomes(project_outcomes),
+                    uptime_percent=availability_from_stats(project_stats),
                 )
             )
         return summaries
@@ -265,18 +266,17 @@ class PublicStatusService:
 
             for component in kind_components:
                 service_days: list[PublicDayBar] = []
-                service_outcomes: list[str] = []
+                service_stats = empty_day_stats()
 
                 for day in day_keys:
                     stats = checks_by_component_day.get((component.id, day), empty_day_stats())
-                    service_outcomes.extend(stats.outcomes)
-                    day_status = status_from_outcomes(stats.outcomes)
+                    service_stats = _add_stats(service_stats, stats)
+                    day_status = status_from_stats(stats)
                     service_days.append(
                         _build_day_bar(
                             day=day,
                             day_status=day_status,
-                            outcomes=stats.outcomes,
-                            downtime_seconds=stats.downtime_seconds,
+                            stats=stats,
                             incidents=incidents_by_day.get(day, []),
                         )
                     )
@@ -287,12 +287,12 @@ class PublicStatusService:
                         name=component.name,
                         slug=component.slug,
                         component_kind=kind_name,
-                        uptime_percent=_uptime_percent_from_outcomes(service_outcomes),
+                        uptime_percent=availability_from_stats(service_stats),
                         days=service_days,
                     )
                 )
 
-            group_outcomes = _collect_outcomes(
+            group_stats = _sum_stats(
                 [component.id for component in kind_components],
                 day_keys,
                 checks_by_component_day,
@@ -301,15 +301,16 @@ class PublicStatusService:
                 _build_day_bar(
                     day=day,
                     day_status=group_day_statuses[day],
-                    outcomes=_collect_outcomes(
+                    stats=_sum_stats(
                         [component.id for component in kind_components],
                         [day],
                         checks_by_component_day,
-                    ),
-                    downtime_seconds=_max_downtime_for_day(
-                        [component.id for component in kind_components],
-                        day,
-                        checks_by_component_day,
+                    ).with_downtime(
+                        _max_downtime_for_day(
+                            [component.id for component in kind_components],
+                            day,
+                            checks_by_component_day,
+                        )
                     ),
                     incidents=incidents_by_day.get(day, []),
                 )
@@ -319,7 +320,7 @@ class PublicStatusService:
                 PublicComponentGroupTimeline(
                     name=kind_name,
                     component_count=len(kind_components),
-                    uptime_percent=_uptime_percent_from_outcomes(group_outcomes),
+                    uptime_percent=availability_from_stats(group_stats),
                     days=group_days,
                     services=service_timelines,
                 )
@@ -354,16 +355,7 @@ class PublicStatusService:
         self,
         component_ids: list[UUID],
     ) -> dict[UUID, tuple[str, int | None, datetime | None, NetworkSummary | None]]:
-        if not component_ids:
-            return {}
-
-        stmt = (
-            select(CheckResult)
-            .where(CheckResult.monitored_component_id.in_(component_ids))
-            .order_by(CheckResult.monitored_component_id, CheckResult.checked_at.desc())
-            .distinct(CheckResult.monitored_component_id)
-        )
-        rows = self._session.scalars(stmt).all()
+        rows = fetch_latest_check_results(self._session, component_ids)
         return {
             row.monitored_component_id: (
                 row.outcome,
@@ -387,53 +379,119 @@ class PublicStatusService:
 
         start_dt = datetime.combine(range_start, datetime.min.time(), tzinfo=UTC)
         end_dt = datetime.combine(range_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
-        now = datetime.now(UTC)
+        stats = self._day_outcome_counts_by_component_day(component_ids, start_dt, end_dt)
+        if not include_downtime:
+            return stats
 
+        downtimes = self._day_downtime_by_component_day(
+            component_ids,
+            range_start=range_start,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        for key, downtime_seconds in downtimes.items():
+            current = stats.get(key, empty_day_stats())
+            stats[key] = current.with_downtime(downtime_seconds)
+        return stats
+
+    def _day_downtime_by_component_day(
+        self,
+        component_ids: list[UUID],
+        *,
+        range_start: date,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> dict[tuple[UUID, date], int]:
+        now = datetime.now(UTC)
+        day_expr = func.date(func.timezone("UTC", CheckResult.checked_at))
+        is_down = CheckResult.outcome.in_(tuple(OUTAGE_OUTCOMES))
         rows = self._session.execute(
             select(
                 CheckResult.monitored_component_id,
-                CheckResult.checked_at,
-                CheckResult.outcome,
+                day_expr.label("day"),
+                func.array_agg(aggregate_order_by(CheckResult.checked_at, CheckResult.checked_at)).label(
+                    "checked_ats"
+                ),
+                func.array_agg(aggregate_order_by(is_down, CheckResult.checked_at)).label("is_downs"),
             )
             .where(
                 CheckResult.monitored_component_id.in_(component_ids),
                 CheckResult.checked_at >= start_dt,
                 CheckResult.checked_at < end_dt,
             )
-            .order_by(CheckResult.checked_at.asc())
+            .group_by(CheckResult.monitored_component_id, day_expr)
         ).all()
 
-        pre_range_outcomes = (
-            self._last_outcomes_before(component_ids, start_dt) if include_downtime else {}
-        )
+        pre_range_outcomes = self._last_outcomes_before(component_ids, start_dt)
+        events_by_key: dict[tuple[UUID, date], list[tuple[datetime, str]]] = {}
+        for component_id, day, checked_ats, is_downs in rows:
+            day_value = day if isinstance(day, date) else date.fromisoformat(str(day))
+            events_by_key[(component_id, day_value)] = [
+                (
+                    checked_at,
+                    CheckOutcome.DOWN.value if down_flag else CheckOutcome.UP.value,
+                )
+                for checked_at, down_flag in zip(checked_ats, is_downs, strict=True)
+            ]
 
-        events_by_key: dict[tuple[UUID, date], list[tuple[datetime, str]]] = defaultdict(list)
-        for component_id, checked_at, outcome in rows:
-            day = checked_at.astimezone(UTC).date()
-            events_by_key[(component_id, day)].append((checked_at, outcome))
-
-        stats: dict[tuple[UUID, date], DayCheckStats] = {}
+        downtimes: dict[tuple[UUID, date], int] = {}
         for key, events in events_by_key.items():
             component_id, day = key
-            downtime_seconds = 0
-            if include_downtime:
-                previous_outcome = _outcome_at_end_of_previous_day(
-                    component_id,
-                    day,
-                    range_start,
-                    pre_range_outcomes,
-                    events_by_key,
-                )
-                continuing_outage = previous_outcome is not None and is_outage_outcome(previous_outcome)
-                downtime_seconds = compute_downtime_seconds(
-                    events,
-                    day=day,
-                    now=now,
-                    continuing_outage=continuing_outage,
-                )
+            previous_outcome = _outcome_at_end_of_previous_day(
+                component_id,
+                day,
+                range_start,
+                pre_range_outcomes,
+                events_by_key,
+            )
+            continuing_outage = previous_outcome is not None and is_outage_outcome(previous_outcome)
+            downtimes[key] = compute_downtime_seconds(
+                events,
+                day=day,
+                now=now,
+                continuing_outage=continuing_outage,
+            )
+        return downtimes
+
+    def _day_outcome_counts_by_component_day(
+        self,
+        component_ids: list[UUID],
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> dict[tuple[UUID, date], DayCheckStats]:
+        """Compact day stats for list/uptime views that do not need downtime timelines."""
+        day_expr = func.date(func.timezone("UTC", CheckResult.checked_at))
+        rows = self._session.execute(
+            select(
+                CheckResult.monitored_component_id,
+                day_expr.label("day"),
+                CheckResult.outcome,
+                func.count().label("cnt"),
+            )
+            .where(
+                CheckResult.monitored_component_id.in_(component_ids),
+                CheckResult.checked_at >= start_dt,
+                CheckResult.checked_at < end_dt,
+            )
+            .group_by(CheckResult.monitored_component_id, day_expr, CheckResult.outcome)
+        ).all()
+
+        counts_by_key: dict[tuple[UUID, date], dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for component_id, day, outcome, cnt in rows:
+            day_value = day if isinstance(day, date) else date.fromisoformat(str(day))
+            counts_by_key[(component_id, day_value)][str(outcome)] += int(cnt)
+
+        stats: dict[tuple[UUID, date], DayCheckStats] = {}
+        for key, counts in counts_by_key.items():
+            up = counts.get(CheckOutcome.UP.value, 0)
+            degraded = counts.get(CheckOutcome.DEGRADED.value, 0)
+            failed = sum(counts.get(outcome, 0) for outcome in OUTAGE_OUTCOMES)
             stats[key] = DayCheckStats(
-                outcomes=[outcome for _, outcome in events],
-                downtime_seconds=downtime_seconds,
+                downtime_seconds=0,
+                total=sum(counts.values()),
+                up=up,
+                degraded=degraded,
+                failed=failed,
             )
         return stats
 
@@ -442,19 +500,8 @@ class PublicStatusService:
         component_ids: list[UUID],
         before: datetime,
     ) -> dict[UUID, str]:
-        if not component_ids:
-            return {}
-
-        rows = self._session.execute(
-            select(CheckResult.monitored_component_id, CheckResult.outcome)
-            .where(
-                CheckResult.monitored_component_id.in_(component_ids),
-                CheckResult.checked_at < before,
-            )
-            .order_by(CheckResult.monitored_component_id, CheckResult.checked_at.desc())
-            .distinct(CheckResult.monitored_component_id)
-        ).all()
-        return {component_id: outcome for component_id, outcome in rows}
+        rows = fetch_latest_check_results(self._session, component_ids, before=before)
+        return {row.monitored_component_id: row.outcome for row in rows}
 
     def _incidents_by_day(
         self,
@@ -694,18 +741,28 @@ def _date_range(start: date, end: date) -> list[date]:
     return days
 
 
-def _collect_outcomes(
+def _add_stats(left: DayCheckStats, right: DayCheckStats) -> DayCheckStats:
+    return DayCheckStats(
+        downtime_seconds=left.downtime_seconds + right.downtime_seconds,
+        total=left.total + right.total,
+        up=left.up + right.up,
+        degraded=left.degraded + right.degraded,
+        failed=left.failed + right.failed,
+    )
+
+
+def _sum_stats(
     component_ids: list[UUID],
     day_keys: list[date],
     day_stats_by_component_day: dict[tuple[UUID, date], DayCheckStats],
-) -> list[str]:
-    outcomes: list[str] = []
+) -> DayCheckStats:
+    total = empty_day_stats()
     for component_id in component_ids:
         for day in day_keys:
             stats = day_stats_by_component_day.get((component_id, day))
-            if stats:
-                outcomes.extend(stats.outcomes)
-    return outcomes
+            if stats is not None and stats.total:
+                total = _add_stats(total, stats)
+    return total
 
 
 def _outcome_at_end_of_previous_day(
@@ -718,7 +775,7 @@ def _outcome_at_end_of_previous_day(
     prev_day = day - timedelta(days=1)
     prev_events = events_by_key.get((component_id, prev_day))
     if prev_events:
-        return prev_events[-1][1]
+        return max(prev_events, key=lambda item: item[0])[1]
     if day == range_start:
         return pre_range_outcomes.get(component_id)
     return None
@@ -746,7 +803,7 @@ def _project_day_statuses(
     for component_id in component_ids:
         for day in day_keys:
             stats = day_stats_by_component_day.get((component_id, day), empty_day_stats())
-            day_status = status_from_outcomes(stats.outcomes)
+            day_status = status_from_stats(stats)
             project_day_statuses[day] = _merge_status(project_day_statuses[day], day_status)
     return project_day_statuses
 
@@ -757,20 +814,18 @@ def _merge_status(current: str, incoming: str) -> str:
     return current
 
 
-def _uptime_percent_from_outcomes(outcomes: list[str]) -> float | None:
-    return availability_percent(outcomes)
-
-
 def _build_day_bar(
     *,
     day: date,
     day_status: str,
-    outcomes: list[str],
-    downtime_seconds: int = 0,
+    stats: DayCheckStats,
     incidents: list[PublicDayIncident],
 ) -> PublicDayBar:
-    total, up, degraded, failed = day_check_counts(outcomes)
-    availability = availability_percent(outcomes)
+    total = stats.total
+    up = stats.up
+    degraded = stats.degraded
+    failed = stats.failed
+    availability = availability_from_stats(stats)
 
     tooltip_parts: list[str] = []
     if total:
@@ -796,7 +851,7 @@ def _build_day_bar(
         failed_count=failed,
         degraded_count=degraded,
         availability_percent=availability,
-        downtime_seconds=downtime_seconds,
+        downtime_seconds=stats.downtime_seconds,
         incidents=incidents,
     )
 

@@ -28,7 +28,7 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_has_single_head() -> None:
     heads = _script_directory().get_heads()
-    assert heads == ["015"], f"expected single head 015, got {heads}"
+    assert heads == ["016"], f"expected single head 016, got {heads}"
 
 
 def test_alembic_revision_ids_are_unique() -> None:
@@ -132,7 +132,7 @@ def test_alembic_upgrade_head_on_empty_database() -> None:
 
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "015"
+        assert version == "016"
 
         columns = {column["name"] for column in inspector.get_columns("monitored_components")}
         assert "speed_test_url_template" in columns
@@ -149,6 +149,20 @@ def test_alembic_upgrade_head_on_empty_database() -> None:
         assert "bucket_start" in ping_columns
         assert "target" in ping_columns
         assert "loss_percent" in ping_columns
+        check_indexes = {index["name"] for index in inspector.get_indexes("check_results")}
+        assert "ix_check_results_component_checked_at" in check_indexes
+        connection_indexes = {index["name"] for index in inspector.get_indexes("connection_events")}
+        assert "ix_connection_events_component_occurred_at" in connection_indexes
+        ping_indexes = {index["name"] for index in inspector.get_indexes("tunnel_ping_samples")}
+        assert "ix_tunnel_ping_samples_component_bucket_start" in ping_indexes
+        with engine.connect() as conn:
+            covering_def = conn.execute(
+                text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE indexname = 'ix_check_results_component_checked_at'"
+                )
+            ).scalar_one()
+        assert "INCLUDE (outcome)" in covering_def
     except (psycopg.Error, OperationalError) as exc:
         pytest.skip(f"PostgreSQL is not available for migration integration test: {exc}")
     finally:
@@ -260,7 +274,7 @@ def test_compose_database_is_at_head_revision() -> None:
         engine = create_engine(database_url, pool_pre_ping=True)
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "015"
+        assert version == "016"
 
         columns = {column["name"] for column in inspect(engine).get_columns("monitored_components")}
         assert "speed_test_bytes" in columns
