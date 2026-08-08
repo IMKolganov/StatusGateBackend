@@ -41,6 +41,10 @@ class PublicDayIncident(BaseModel):
     message: str
     status: str
     posted_at: datetime
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    service_name: str | None = None
+    service_slug: str | None = None
 
 
 class PublicDayBar(BaseModel):

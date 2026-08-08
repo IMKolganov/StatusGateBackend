@@ -4,7 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session, selectinload
 
@@ -14,7 +14,6 @@ from app.models.check_result import CheckResult
 from app.models.connection_event import ConnectionEvent
 from app.models.enums import CheckOutcome, IncidentUpdateStatus
 from app.models.incident import Incident
-from app.models.incident_update import IncidentUpdate
 from app.models.monitored_component import MonitoredComponent
 from app.models.tunnel_ping_sample import TunnelPingSample
 from app.schemas.network import NetworkSummary
@@ -244,7 +243,7 @@ class PublicStatusService:
         component_ids = [component.id for component in components]
 
         checks_by_component_day = self._day_stats_by_component_day(component_ids, range_start, range_end)
-        incidents_by_day = self._incidents_by_day(project.id, range_start, range_end)
+        timeline_incidents = self._load_timeline_incidents(project.id, range_start, range_end)
 
         groups_map: dict[str, list[MonitoredComponent]] = defaultdict(list)
         for component in components:
@@ -254,6 +253,7 @@ class PublicStatusService:
         latest_by_component = self._latest_check_results(component_ids)
         for kind_name in sorted(groups_map):
             kind_components = sorted(groups_map[kind_name], key=lambda item: item.name.lower())
+            kind_component_ids = {component.id for component in kind_components}
             service_timelines: list[PublicServiceTimeline] = []
             group_day_statuses = {
                 day: status
@@ -277,7 +277,11 @@ class PublicStatusService:
                             day=day,
                             day_status=day_status,
                             stats=stats,
-                            incidents=incidents_by_day.get(day, []),
+                            incidents=_day_incidents_for(
+                                timeline_incidents,
+                                day,
+                                component_id=component.id,
+                            ),
                         )
                     )
 
@@ -312,7 +316,11 @@ class PublicStatusService:
                             checks_by_component_day,
                         )
                     ),
-                    incidents=incidents_by_day.get(day, []),
+                    incidents=_day_incidents_for(
+                        timeline_incidents,
+                        day,
+                        component_ids=kind_component_ids,
+                    ),
                 )
                 for day in day_keys
             ]
@@ -503,39 +511,30 @@ class PublicStatusService:
         rows = fetch_latest_check_results(self._session, component_ids, before=before)
         return {row.monitored_component_id: row.outcome for row in rows}
 
-    def _incidents_by_day(
+    def _load_timeline_incidents(
         self,
         project_id: UUID,
         range_start: date,
         range_end: date,
-    ) -> dict[date, list[PublicDayIncident]]:
+    ) -> list[Incident]:
+        """Incidents whose [starts_at, ends_at|now] overlaps the visible UTC day range."""
         start_dt = datetime.combine(range_start, datetime.min.time(), tzinfo=UTC)
         end_dt = datetime.combine(range_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
-
-        rows = self._session.scalars(
-            select(IncidentUpdate)
-            .join(Incident, Incident.id == IncidentUpdate.incident_id)
-            .where(
-                Incident.project_id == project_id,
-                IncidentUpdate.posted_at >= start_dt,
-                IncidentUpdate.posted_at < end_dt,
-            )
-            .options(selectinload(IncidentUpdate.incident))
-            .order_by(IncidentUpdate.posted_at.asc())
-        ).all()
-
-        grouped: dict[date, list[PublicDayIncident]] = defaultdict(list)
-        for row in rows:
-            day = row.posted_at.astimezone(UTC).date()
-            grouped[day].append(
-                PublicDayIncident(
-                    title=row.incident.title,
-                    message=row.message,
-                    status=row.status,
-                    posted_at=row.posted_at,
+        return list(
+            self._session.scalars(
+                select(Incident)
+                .where(
+                    Incident.project_id == project_id,
+                    Incident.starts_at < end_dt,
+                    or_(Incident.ends_at.is_(None), Incident.ends_at >= start_dt),
                 )
-            )
-        return grouped
+                .options(
+                    selectinload(Incident.updates),
+                    selectinload(Incident.monitored_component),
+                )
+                .order_by(Incident.starts_at.asc())
+            ).all()
+        )
 
     def _active_alerts(
         self,
@@ -739,6 +738,79 @@ def _date_range(start: date, end: date) -> list[date]:
         days.append(current)
         current += timedelta(days=1)
     return days
+
+
+def _incident_overlaps_day(incident: Incident, day: date, *, now: datetime) -> bool:
+    day_start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+    day_end = day_start + timedelta(days=1)
+    range_end = incident.ends_at or now
+    starts_at = incident.starts_at
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=UTC)
+    if range_end.tzinfo is None:
+        range_end = range_end.replace(tzinfo=UTC)
+    return starts_at < day_end and range_end >= day_start
+
+
+def _incident_matches_scope(
+    incident: Incident,
+    *,
+    component_id: UUID | None = None,
+    component_ids: set[UUID] | None = None,
+) -> bool:
+    if incident.monitored_component_id is None:
+        return True
+    if component_id is not None:
+        return incident.monitored_component_id == component_id
+    if component_ids is not None:
+        return incident.monitored_component_id in component_ids
+    return True
+
+
+def _public_day_incident(incident: Incident, day: date) -> PublicDayIncident:
+    day_end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    updates = sorted(incident.updates, key=lambda item: item.posted_at)
+    latest = None
+    for update in updates:
+        posted_at = update.posted_at if update.posted_at.tzinfo else update.posted_at.replace(tzinfo=UTC)
+        if posted_at < day_end:
+            latest = update
+    if latest is None and updates:
+        latest = updates[-1]
+    component = incident.monitored_component
+    return PublicDayIncident(
+        title=incident.title,
+        message=latest.message if latest is not None else "",
+        status=latest.status if latest is not None else "update",
+        posted_at=latest.posted_at if latest is not None else incident.starts_at,
+        starts_at=incident.starts_at,
+        ends_at=incident.ends_at,
+        service_name=component.name if component is not None else None,
+        service_slug=component.slug if component is not None else None,
+    )
+
+
+def _day_incidents_for(
+    incidents: list[Incident],
+    day: date,
+    *,
+    component_id: UUID | None = None,
+    component_ids: set[UUID] | None = None,
+    now: datetime | None = None,
+) -> list[PublicDayIncident]:
+    current = now or datetime.now(UTC)
+    result: list[PublicDayIncident] = []
+    for incident in incidents:
+        if not _incident_matches_scope(
+            incident,
+            component_id=component_id,
+            component_ids=component_ids,
+        ):
+            continue
+        if not _incident_overlaps_day(incident, day, now=current):
+            continue
+        result.append(_public_day_incident(incident, day))
+    return result
 
 
 def _add_stats(left: DayCheckStats, right: DayCheckStats) -> DayCheckStats:
