@@ -10,6 +10,7 @@ from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES, MAX_SPEED_TEST_BYTES, MonitoredComponentCreate
 from app.schemas.network import NetworkSummary
+from app.services import speed_measure
 from app.services import vpn_check_service as vpn
 from app.services.speed_test_config import DEFAULT_SPEED_TEST_URL_TEMPLATE, build_speed_test_url
 from app.services.health_check_service import run_health_check
@@ -350,9 +351,9 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
             def __exit__(self, *args):
                 return False
 
-        with patch("app.services.vpn_check_service.httpx.Client", return_value=FakeClient()):
-            with patch("app.services.vpn_check_service.time.perf_counter", side_effect=[0.0, 1.0]):
-                result = vpn._measure_download_speed("https://example.test/down", proxy_url=None, timeout=10)
+        with patch("app.services.speed_measure.httpx.Client", return_value=FakeClient()):
+            with patch("app.services.speed_measure.time.perf_counter", side_effect=[0.0, 1.0]):
+                result = speed_measure.measure_download_speed("https://example.test/down", proxy_url=None, timeout=10)
         assert result is not None
         assert result["ok"] is True
         assert result["bytes"] == 1024
@@ -365,14 +366,14 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
         assert public_network_summary({"network": "bad"}) is None
 
     def test_read_dns_servers(self) -> None:
-        with patch("app.services.vpn_check_service.Path") as path_cls:
+        with patch("app.services.network_enrich.Path") as path_cls:
             path_cls.return_value.exists.return_value = True
             path_cls.return_value.read_text.return_value = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
             assert vpn._read_dns_servers() == ["1.1.1.1", "8.8.8.8"]
 
     def test_list_tun_interfaces(self) -> None:
         payload = json.dumps([{"ifname": "eth0"}, {"ifname": "tun0"}, {"ifname": "tun1"}])
-        with patch("app.services.vpn_check_service.subprocess.check_output", return_value=payload):
+        with patch("app.services.tun_iface.subprocess.check_output", return_value=payload):
             assert vpn._list_tun_interfaces() == ["tun0", "tun1"]
 
     def test_interface_is_up(self) -> None:
@@ -384,18 +385,18 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
                 }
             ]
         )
-        with patch("app.services.vpn_check_service.subprocess.check_output", return_value=payload):
+        with patch("app.services.tun_iface.subprocess.check_output", return_value=payload):
             assert vpn._interface_is_up("tun0") is True
 
     def test_interface_is_up_without_address(self) -> None:
         payload = json.dumps([{"flags": ["UP"], "addr_info": []}])
-        with patch("app.services.vpn_check_service.subprocess.check_output", return_value=payload):
+        with patch("app.services.tun_iface.subprocess.check_output", return_value=payload):
             assert vpn._interface_is_up("tun0") is False
 
     def test_probe_endpoint_success(self) -> None:
         request = httpx.Request("GET", "https://ifconfig.me/ip")
         response = httpx.Response(200, text="203.0.113.1\n", request=request)
-        with patch("app.services.vpn_check_service.httpx.Client") as client_cls:
+        with patch("app.services.http_probe.httpx.Client") as client_cls:
             client_cls.return_value.__enter__.return_value.get.return_value = response
             probe = vpn._probe_endpoint("https://ifconfig.me/ip", timeout=5)
         assert probe["ok"] is True
@@ -403,7 +404,7 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
         assert probe["status_code"] == 200
 
     def test_probe_endpoint_failure(self) -> None:
-        with patch("app.services.vpn_check_service.httpx.Client") as client_cls:
+        with patch("app.services.http_probe.httpx.Client") as client_cls:
             client_cls.return_value.__enter__.return_value.get.side_effect = httpx.ConnectError("refused")
             probe = vpn._probe_endpoint("https://ifconfig.me/ip", timeout=5)
         assert probe["ok"] is False

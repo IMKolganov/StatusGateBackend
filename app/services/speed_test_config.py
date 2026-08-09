@@ -1,6 +1,9 @@
+"""Speed-test URL templates, scheduling, and shared live slot."""
+
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,6 +13,7 @@ from uuid import UUID
 from app.core.speed_test_defaults import (
     CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE,
     CLOUDFLARE_SPEED_TEST_MIN_GAP_SECONDS,
+    CLOUDFLARE_SPEED_TEST_ORIGIN,
     DEFAULT_SPEED_TEST_URL_TEMPLATE,
     SPEED_TEST_MIN_GAP_SECONDS,
     SPEED_TEST_RATE_LIMIT_BACKOFF_SECONDS,
@@ -17,8 +21,31 @@ from app.core.speed_test_defaults import (
 from app.models.check_result import CheckResult
 from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MonitoringSettings
+from app.services.speed_test_memory import (
+    _is_deferred_speed_test_row,
+    _is_live_speed_test_row,
+    extract_last_live_speed_test_from_details,
+    extract_last_successful_speed_test,
+    extract_speed_test_from_details,
+    extract_speed_test_stats,
+    extract_speed_test_upload_from_details,
+    extract_speed_test_upload_stats,
+    extract_last_live_speed_test_upload_from_details,
+    extract_last_successful_speed_test_upload,
+    hydrate_speed_test_measured_at,
+    is_meaningful_speed_test_success,
+    is_rate_limited_speed_test,
+    parse_speed_test_measured_at,
+    pick_display_speed_test,
+    resolve_speed_test_memory,
+    resolve_speed_test_upload_memory,
+    stamp_speed_test_measured_at,
+    update_speed_test_stats,
+)
 
+# Re-export memory helpers so existing imports from speed_test_config keep working.
 _speed_test_last_at: float = 0.0
+_speed_test_slot_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -30,6 +57,11 @@ class SpeedTestRunContext:
     previous_speed_test_stats: dict[str, Any] | None = None
     # Last non-cached attempt (success or 429) — carried across deferred rows for scheduling.
     last_live_speed_test: dict[str, Any] | None = None
+    # Parallel memory for VPN upload (__up) measured in the same live slot as download.
+    previous_speed_test_upload: dict[str, Any] | None = None
+    last_successful_speed_test_upload: dict[str, Any] | None = None
+    previous_speed_test_upload_stats: dict[str, Any] | None = None
+    last_live_speed_test_upload: dict[str, Any] | None = None
 
     @classmethod
     def default(cls) -> SpeedTestRunContext:
@@ -39,21 +71,24 @@ class SpeedTestRunContext:
 def reset_cloudflare_speed_test_slot_for_tests() -> None:
     """Reset the shared live speed-test slot (name kept for existing tests)."""
     global _speed_test_last_at
-    _speed_test_last_at = 0.0
+    with _speed_test_slot_lock:
+        _speed_test_last_at = 0.0
 
 
 def is_cloudflare_speed_test_template(template: str) -> bool:
-    return template.strip().startswith("https://speed.cloudflare.com/")
+    origin = CLOUDFLARE_SPEED_TEST_ORIGIN.rstrip("/")
+    return template.strip().startswith(f"{origin}/")
 
 
 def try_acquire_speed_test_slot(*, now: float | None = None) -> bool:
     """Allow at most one live speed test per min gap across all VPN checks in this worker."""
     global _speed_test_last_at
     current = now if now is not None else time.monotonic()
-    if current - _speed_test_last_at < SPEED_TEST_MIN_GAP_SECONDS:
-        return False
-    _speed_test_last_at = current
-    return True
+    with _speed_test_slot_lock:
+        if current - _speed_test_last_at < SPEED_TEST_MIN_GAP_SECONDS:
+            return False
+        _speed_test_last_at = current
+        return True
 
 
 def try_acquire_cloudflare_speed_test_slot(*, now: float | None = None) -> bool:
@@ -78,6 +113,23 @@ def build_speed_test_url(template: str, bytes_count: int) -> str:
     return validate_speed_test_url_template(template).format(bytes=bytes_count)
 
 
+def build_speed_test_upload_url(template: str) -> str | None:
+    """Derive Cloudflare ``__up`` URL from a download template, or None if unsupported.
+
+    Custom non-Cloudflare download templates have no known upload twin — skip upload.
+    """
+    trimmed = validate_speed_test_url_template(template)
+    if "__down" not in trimmed:
+        return None
+    # Upload size is the POST body; drop the download bytes query placeholder.
+    upload_template = trimmed.replace("__down", "__up")
+    upload_template = upload_template.replace("?bytes={bytes}", "").replace("&bytes={bytes}", "")
+    upload_template = upload_template.replace("bytes={bytes}", "")
+    if upload_template.endswith("?") or upload_template.endswith("&"):
+        upload_template = upload_template[:-1]
+    return upload_template
+
+
 def effective_speed_test_url_template(component: MonitoredComponent, settings: MonitoringSettings) -> str:
     if component.speed_test_url_template:
         return component.speed_test_url_template.strip()
@@ -94,265 +146,6 @@ def effective_speed_test_interval_seconds(component: MonitoredComponent, setting
 def uses_default_cloudflare_template(component: MonitoredComponent, settings: MonitoringSettings) -> bool:
     template = effective_speed_test_url_template(component, settings)
     return is_cloudflare_speed_test_template(template)
-
-
-def _is_live_speed_test_row(speed_test: dict[str, Any]) -> bool:
-    return not bool(
-        speed_test.get("cached")
-        or speed_test.get("deferred")
-        or speed_test.get("throttled")
-        or speed_test.get("stale")
-    )
-
-
-def _is_deferred_speed_test_row(speed_test: dict[str, Any]) -> bool:
-    return bool(speed_test.get("cached") or speed_test.get("deferred") or speed_test.get("throttled"))
-
-
-def extract_last_live_speed_test_from_details(
-    details: dict[str, Any] | None,
-    *,
-    checked_at: datetime | None = None,
-) -> dict[str, Any] | None:
-    """Last real (non-cached) speed-test attempt used for interval / 429 backoff scheduling.
-
-    Prefers ``network.speed_test_last_attempt`` (preserved when a later cycle writes a
-    cached display row), then a live ``network.speed_test``. Cached-only rows return None
-    so the caller can fall back to the cached ``measured_at`` when present.
-    """
-    if not isinstance(details, dict):
-        return None
-    network = details.get("network")
-    if not isinstance(network, dict):
-        return None
-
-    last_attempt = network.get("speed_test_last_attempt")
-    if isinstance(last_attempt, dict) and _is_live_speed_test_row(last_attempt):
-        return hydrate_speed_test_measured_at(last_attempt, checked_at=checked_at)
-
-    speed_test = network.get("speed_test")
-    if isinstance(speed_test, dict) and _is_live_speed_test_row(speed_test):
-        return hydrate_speed_test_measured_at(speed_test, checked_at=checked_at)
-    return None
-
-
-def is_meaningful_speed_test_success(speed_test: dict[str, Any] | None) -> bool:
-    """True only for a real download — zero bytes / 0 Mbps must not be cached as success."""
-    if not speed_test or speed_test.get("ok") is not True:
-        return False
-    try:
-        bytes_count = float(speed_test.get("bytes") or 0)
-    except (TypeError, ValueError):
-        bytes_count = 0.0
-    if bytes_count <= 0:
-        return False
-    mbps = speed_test.get("mbps")
-    if mbps is None:
-        return True
-    try:
-        return float(mbps) > 0
-    except (TypeError, ValueError):
-        return False
-
-
-def hydrate_speed_test_measured_at(
-    speed_test: dict[str, Any] | None,
-    *,
-    checked_at: datetime | None,
-) -> dict[str, Any] | None:
-    """Backfill measured_at for legacy live rows that predate the timestamp field."""
-    if not speed_test:
-        return None
-    if speed_test.get("measured_at") or not checked_at:
-        return speed_test
-    if not is_meaningful_speed_test_success(speed_test) or not _is_live_speed_test_row(speed_test):
-        return speed_test
-    when = checked_at if checked_at.tzinfo is not None else checked_at.replace(tzinfo=UTC)
-    return stamp_speed_test_measured_at(speed_test, when=when)
-
-
-def extract_speed_test_from_details(
-    details: dict[str, Any] | None,
-    *,
-    checked_at: datetime | None = None,
-) -> dict[str, Any] | None:
-    if not isinstance(details, dict):
-        return None
-    network = details.get("network")
-    if not isinstance(network, dict):
-        return None
-    speed_test = network.get("speed_test")
-    if not isinstance(speed_test, dict):
-        return None
-    return hydrate_speed_test_measured_at(speed_test, checked_at=checked_at)
-
-
-def extract_last_successful_speed_test(
-    details: dict[str, Any] | None,
-    *,
-    checked_at: datetime | None = None,
-) -> dict[str, Any] | None:
-    if not isinstance(details, dict):
-        return None
-    network = details.get("network")
-    if not isinstance(network, dict):
-        return None
-    last_success = network.get("speed_test_last_success")
-    if isinstance(last_success, dict) and is_meaningful_speed_test_success(last_success):
-        return hydrate_speed_test_measured_at(last_success, checked_at=checked_at)
-    speed_test = network.get("speed_test")
-    if isinstance(speed_test, dict) and is_meaningful_speed_test_success(speed_test):
-        return hydrate_speed_test_measured_at(speed_test, checked_at=checked_at)
-    return None
-
-
-def extract_speed_test_stats(details: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(details, dict):
-        return None
-    network = details.get("network")
-    if not isinstance(network, dict):
-        return None
-    stats = network.get("speed_test_stats")
-    if isinstance(stats, dict) and _normalize_speed_test_stats(stats) is not None:
-        return _normalize_speed_test_stats(stats)
-
-    # Seed from a single known success when stats were never recorded.
-    last_success = extract_last_successful_speed_test(details)
-    if not is_meaningful_speed_test_success(last_success):
-        return None
-    try:
-        mbps = float(last_success.get("mbps"))  # type: ignore[union-attr]
-    except (TypeError, ValueError):
-        return None
-    return {
-        "min_mbps": mbps,
-        "max_mbps": mbps,
-        "avg_mbps": mbps,
-        "sample_count": 1,
-    }
-
-
-def resolve_speed_test_memory(
-    latest_details: dict[str, Any] | None,
-    *,
-    latest_checked_at: datetime | None = None,
-    history_details: dict[str, Any] | None = None,
-    history_checked_at: datetime | None = None,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
-    """Carry speed-test memory across down/timeout gaps that wipe network details.
-
-    Returns ``(previous_speed_test, last_successful_speed_test, speed_test_stats)``.
-    ``previous_speed_test`` always comes from the latest check (interval / deferral).
-    Success + stats fall back to an older check when the latest row has none.
-    """
-    previous = extract_speed_test_from_details(latest_details, checked_at=latest_checked_at)
-    last_success = extract_last_successful_speed_test(latest_details, checked_at=latest_checked_at)
-    stats = extract_speed_test_stats(latest_details)
-
-    if last_success is None and history_details is not None:
-        last_success = extract_last_successful_speed_test(
-            history_details,
-            checked_at=history_checked_at,
-        )
-    if stats is None and history_details is not None:
-        stats = extract_speed_test_stats(history_details)
-    if stats is None and is_meaningful_speed_test_success(last_success):
-        stats = extract_speed_test_stats({"network": {"speed_test_last_success": last_success}})
-
-    return previous, last_success, stats
-
-
-def _normalize_speed_test_stats(stats: dict[str, Any]) -> dict[str, Any] | None:
-    try:
-        min_mbps = float(stats["min_mbps"])
-        max_mbps = float(stats["max_mbps"])
-        avg_mbps = float(stats["avg_mbps"])
-        sample_count = int(stats["sample_count"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if sample_count <= 0 or min_mbps <= 0 or max_mbps <= 0 or avg_mbps <= 0:
-        return None
-    if min_mbps > max_mbps:
-        return None
-    return {
-        "min_mbps": round(min_mbps, 2),
-        "max_mbps": round(max_mbps, 2),
-        "avg_mbps": round(avg_mbps, 2),
-        "sample_count": sample_count,
-    }
-
-
-def update_speed_test_stats(
-    previous_stats: dict[str, Any] | None,
-    *,
-    mbps: float,
-) -> dict[str, Any]:
-    value = round(float(mbps), 2)
-    normalized = _normalize_speed_test_stats(previous_stats) if previous_stats else None
-    if normalized is None:
-        return {
-            "min_mbps": value,
-            "max_mbps": value,
-            "avg_mbps": value,
-            "sample_count": 1,
-        }
-    count = normalized["sample_count"] + 1
-    avg = ((normalized["avg_mbps"] * normalized["sample_count"]) + value) / count
-    return {
-        "min_mbps": round(min(normalized["min_mbps"], value), 2),
-        "max_mbps": round(max(normalized["max_mbps"], value), 2),
-        "avg_mbps": round(avg, 2),
-        "sample_count": count,
-    }
-
-
-def parse_speed_test_measured_at(speed_test: dict[str, Any] | None) -> datetime | None:
-    if not speed_test:
-        return None
-    raw = speed_test.get("measured_at")
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
-
-
-def stamp_speed_test_measured_at(speed_test: dict[str, Any], *, when: datetime | None = None) -> dict[str, Any]:
-    stamped = dict(speed_test)
-    stamped["measured_at"] = (when or datetime.now(UTC)).isoformat()
-    return stamped
-
-
-def is_rate_limited_speed_test(speed_test: dict[str, Any] | None) -> bool:
-    if not speed_test or speed_test.get("ok") is True:
-        return False
-    error = str(speed_test.get("error", ""))
-    return "429" in error or "rate limit" in error.lower()
-
-
-def pick_display_speed_test(
-    previous_speed_test: dict[str, Any] | None,
-    last_successful_speed_test: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if is_meaningful_speed_test_success(previous_speed_test):
-        return previous_speed_test
-    if is_meaningful_speed_test_success(last_successful_speed_test):
-        displayed = dict(last_successful_speed_test)  # type: ignore[arg-type]
-        displayed["stale"] = True
-        return displayed
-    # Prefer a real prior failure over a meaningless 0 Mbps "ok" row.
-    if previous_speed_test and previous_speed_test.get("ok") is False:
-        return previous_speed_test
-    if previous_speed_test and not is_meaningful_speed_test_success(previous_speed_test):
-        failed = dict(previous_speed_test)
-        failed["ok"] = False
-        failed.setdefault("error", "Speed test downloaded no data")
-        return failed
-    return previous_speed_test
 
 
 def effective_speed_test_retry_seconds(
@@ -499,11 +292,14 @@ def speed_test_rate_warning(
     if per_minute <= CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE:
         return None
 
+    host = CLOUDFLARE_SPEED_TEST_ORIGIN.removeprefix("https://").removeprefix("http://").rstrip("/")
     return (
         f"{len(active_vpn)} active VPN services may trigger about {per_minute:.1f} speed tests per minute "
-        f"on speed.cloudflare.com from this server (Cloudflare has no published limit; HTTP 429 may occur above ~"
+        f"on {host} from this server (Cloudflare has no published limit; HTTP 429 may occur above ~"
         f"{CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE}/min). "
         "The worker enforces at least "
         f"{CLOUDFLARE_SPEED_TEST_MIN_GAP_SECONDS}s between live speed tests and staggers which VPN runs next. "
         "Use a custom speed test URL, increase speed-test intervals, or reduce polling frequency."
     )
+
+

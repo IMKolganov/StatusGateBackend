@@ -15,13 +15,16 @@ from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 from app.models.project import Project
 from app.services.health_check_service import run_health_check
+from app.services.host_wan_speed import run_host_wan_speed_if_due
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
     extract_last_live_speed_test_from_details,
+    extract_last_live_speed_test_upload_from_details,
     extract_last_successful_speed_test,
     pick_staggered_speed_test_component_ids,
     resolve_speed_test_memory,
+    resolve_speed_test_upload_memory,
     should_run_speed_test,
 )
 
@@ -263,7 +266,20 @@ class HealthCheckRunner:
                 history_details=history_details,
                 history_checked_at=history.checked_at if history else None,
             )
+            (
+                previous_speed_test_upload,
+                last_successful_speed_test_upload,
+                previous_speed_test_upload_stats,
+            ) = resolve_speed_test_upload_memory(
+                latest_details,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
+            )
             last_live_speed_test = extract_last_live_speed_test_from_details(
+                latest_details, checked_at=checked_at
+            )
+            last_live_speed_test_upload = extract_last_live_speed_test_upload_from_details(
                 latest_details, checked_at=checked_at
             )
             due = should_run_speed_test(component, settings, latest)
@@ -278,6 +294,10 @@ class HealthCheckRunner:
                 last_successful_speed_test=last_successful_speed_test,
                 previous_speed_test_stats=previous_speed_test_stats,
                 last_live_speed_test=last_live_speed_test,
+                previous_speed_test_upload=previous_speed_test_upload,
+                last_successful_speed_test_upload=last_successful_speed_test_upload,
+                previous_speed_test_upload_stats=previous_speed_test_upload_stats,
+                last_live_speed_test_upload=last_live_speed_test_upload,
             )
         result = run_health_check(component, speed_test_context=speed_test_context)
         component.last_checked_at = result.checked_at
@@ -289,6 +309,9 @@ class HealthCheckRunner:
         due = self.list_due_components()
         due.sort(key=lambda component: (component.check_type not in VPN_CHECK_TYPES, str(component.id)))
         settings = self.get_settings()
+        # Host WAN baseline shares the global speed-test slot with VPN tests; run first so
+        # ephemeral OpenVPN checks in this cycle do not block a due WAN measurement.
+        run_host_wan_speed_if_due(settings)
         vpn_due = [component for component in due if component.check_type in VPN_CHECK_TYPES]
         latest_map = self._results_repo.latest_by_component_ids([component.id for component in vpn_due])
         allowed_speed_ids = pick_staggered_speed_test_component_ids(vpn_due, settings, latest_map)

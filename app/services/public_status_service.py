@@ -624,29 +624,56 @@ def _build_tunnel_metric_point(
     probe = network.get("probe") if isinstance(network.get("probe"), dict) else {}
     google_probe = network.get("google_probe") if isinstance(network.get("google_probe"), dict) else {}
     speed = network.get("speed_test") if isinstance(network.get("speed_test"), dict) else {}
+    upload = network.get("speed_test_upload") if isinstance(network.get("speed_test_upload"), dict) else {}
+    direct_download = (
+        network.get("direct_speed_test") if isinstance(network.get("direct_speed_test"), dict) else {}
+    )
+    direct_upload = (
+        network.get("direct_speed_test_upload")
+        if isinstance(network.get("direct_speed_test_upload"), dict)
+        else {}
+    )
 
-    download_mbps: float | None = None
-    download_bytes: int | None = None
-    download_duration_ms: int | None = None
-    download_cached: bool | None = None
-    speed_test_ok: bool | None = None
-    measured_at = speed.get("measured_at") if isinstance(speed.get("measured_at"), str) else None
-
-    if speed:
-        if speed.get("ok") is True:
-            speed_test_ok = True
-            mbps = _as_float(speed.get("mbps"))
-            if mbps is not None and mbps > 0:
-                download_mbps = mbps
-                download_bytes = _as_int(speed.get("bytes"))
-                download_duration_ms = _as_int(speed.get("duration_ms"))
-                download_cached = bool(
-                    speed.get("cached") or speed.get("deferred") or speed.get("stale")
-                )
+    def _extract_speed(payload: dict[str, Any]) -> tuple[
+        float | None, int | None, int | None, bool | None, bool | None, str | None
+    ]:
+        mbps: float | None = None
+        bytes_count: int | None = None
+        duration_ms: int | None = None
+        cached: bool | None = None
+        ok: bool | None = None
+        measured_at = payload.get("measured_at") if isinstance(payload.get("measured_at"), str) else None
+        if not payload:
+            return mbps, bytes_count, duration_ms, cached, ok, measured_at
+        if payload.get("ok") is True:
+            ok = True
+            value = _as_float(payload.get("mbps"))
+            if value is not None and value > 0:
+                mbps = value
+                bytes_count = _as_int(payload.get("bytes"))
+                duration_ms = _as_int(payload.get("duration_ms"))
+                cached = bool(payload.get("cached") or payload.get("deferred") or payload.get("stale"))
             else:
-                speed_test_ok = False
-        elif speed.get("ok") is False:
-            speed_test_ok = False
+                ok = False
+        elif payload.get("ok") is False:
+            ok = False
+        return mbps, bytes_count, duration_ms, cached, ok, measured_at
+
+    download_mbps, download_bytes, download_duration_ms, download_cached, speed_test_ok, measured_at = (
+        _extract_speed(speed)
+    )
+    upload_mbps, upload_bytes, upload_duration_ms, upload_cached, upload_ok, upload_measured_at = (
+        _extract_speed(upload)
+    )
+    direct_dl_mbps, _, _, direct_dl_cached, _, _ = _extract_speed(direct_download)
+    direct_ul_mbps, _, _, direct_ul_cached, _, _ = _extract_speed(direct_upload)
+    direct_measured_at = (
+        network.get("direct_speed_test_measured_at")
+        if isinstance(network.get("direct_speed_test_measured_at"), str)
+        else None
+    )
+    if direct_measured_at is None and isinstance(direct_download.get("measured_at"), str):
+        direct_measured_at = direct_download.get("measured_at")
 
     exit_ip = probe.get("exit_ip")
     if exit_ip is not None:
@@ -668,8 +695,19 @@ def _build_tunnel_metric_point(
         download_bytes=download_bytes,
         download_duration_ms=download_duration_ms,
         download_cached=download_cached,
+        upload_mbps=upload_mbps,
+        upload_bytes=upload_bytes,
+        upload_duration_ms=upload_duration_ms,
+        upload_cached=upload_cached,
+        direct_download_mbps=direct_dl_mbps,
+        direct_download_cached=direct_dl_cached,
+        direct_upload_mbps=direct_ul_mbps,
+        direct_upload_cached=direct_ul_cached,
         speed_test_ok=speed_test_ok,
         speed_test_measured_at=measured_at,
+        upload_speed_test_ok=upload_ok,
+        upload_speed_test_measured_at=upload_measured_at,
+        direct_speed_test_measured_at=direct_measured_at,
     )
 
 
@@ -726,6 +764,27 @@ def _build_tunnel_latest_diagnostics(
         speed_test_max_mbps=summary.speed_test_max_mbps,
         speed_test_avg_mbps=summary.speed_test_avg_mbps,
         speed_test_sample_count=summary.speed_test_sample_count,
+        upload_mbps=summary.upload_mbps,
+        upload_bytes=summary.upload_bytes,
+        upload_duration_ms=summary.upload_duration_ms,
+        upload_speed_test_ok=summary.upload_speed_test_ok,
+        upload_speed_test_error=summary.upload_speed_test_error,
+        upload_speed_test_measured_at=summary.upload_speed_test_measured_at,
+        upload_speed_test_last_success_at=summary.upload_speed_test_last_success_at,
+        upload_speed_test_showing_last_success=summary.upload_speed_test_showing_last_success,
+        upload_speed_test_min_mbps=summary.upload_speed_test_min_mbps,
+        upload_speed_test_max_mbps=summary.upload_speed_test_max_mbps,
+        upload_speed_test_avg_mbps=summary.upload_speed_test_avg_mbps,
+        upload_speed_test_sample_count=summary.upload_speed_test_sample_count,
+        direct_download_mbps=summary.direct_download_mbps,
+        direct_download_bytes=summary.direct_download_bytes,
+        direct_download_duration_ms=summary.direct_download_duration_ms,
+        direct_download_measured_at=summary.direct_download_measured_at,
+        direct_upload_mbps=summary.direct_upload_mbps,
+        direct_upload_bytes=summary.direct_upload_bytes,
+        direct_upload_duration_ms=summary.direct_upload_duration_ms,
+        direct_upload_measured_at=summary.direct_upload_measured_at,
+        direct_speed_test_skip_reason=summary.direct_speed_test_skip_reason,
         fresh_speed_tests_in_window=fresh_speed_tests,
         uptime_percent=uptime_percent,
     )

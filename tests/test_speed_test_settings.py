@@ -16,6 +16,7 @@ from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 from app.schemas.monitored_component import MonitoredComponentCreate
 from app.schemas.monitoring import MonitoringSettingsUpdate
+from app.services import network_enrich
 from app.services import vpn_check_service as vpn
 from app.services.monitoring_admin_service import MonitoringAdminService
 from app.services.monitoring_service import HealthCheckRunner
@@ -248,8 +249,8 @@ class TestEnrichNetworkMetricsSpeedTest:
             run_speed_test=False,
             previous_speed_test=previous,
         )
-        with patch("app.services.vpn_check_service._measure_download_speed") as measure:
-            vpn._enrich_network_metrics(
+        with patch("app.services.speed_measure.measure_download_speed") as measure:
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -276,10 +277,11 @@ class TestEnrichNetworkMetricsSpeedTest:
             last_successful_speed_test=last_success,
         )
         with (
-            patch("app.services.vpn_check_service.try_acquire_speed_test_slot", return_value=False),
-            patch("app.services.vpn_check_service._measure_download_speed") as measure,
+            patch("app.services.speed_test_config.try_acquire_speed_test_slot", return_value=False),
+            patch("app.services.network_enrich.try_acquire_speed_test_slot", return_value=False),
+            patch("app.services.speed_measure.measure_download_speed") as measure,
         ):
-            vpn._enrich_network_metrics(
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -300,8 +302,8 @@ class TestEnrichNetworkMetricsSpeedTest:
             previous_speed_test=None,
             last_successful_speed_test=None,
         )
-        with patch("app.services.vpn_check_service._measure_download_speed") as measure:
-            vpn._enrich_network_metrics(
+        with patch("app.services.speed_measure.measure_download_speed") as measure:
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -329,8 +331,8 @@ class TestEnrichNetworkMetricsSpeedTest:
         network: dict = {}
         context = SpeedTestRunContext(url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE, run_speed_test=True)
         measured = {"ok": True, "mbps": 10.0, "bytes": 524288, "url": "https://speed.cloudflare.com/__down?bytes=524288"}
-        with patch("app.services.vpn_check_service._measure_download_speed", return_value=measured) as measure:
-            vpn._enrich_network_metrics(
+        with patch("app.services.speed_measure.measure_download_speed", return_value=measured) as measure:
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url="socks5://127.0.0.1:1080",
@@ -378,8 +380,8 @@ class TestEnrichNetworkMetricsSpeedTest:
             "bytes": 10485760,
             "url": "https://speed.cloudflare.com/__down?bytes=10485760",
         }
-        with patch("app.services.vpn_check_service._measure_download_speed", return_value=measured):
-            vpn._enrich_network_metrics(
+        with patch("app.services.speed_measure.measure_download_speed", return_value=measured):
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -424,10 +426,10 @@ class TestEnrichNetworkMetricsSpeedTest:
         )
         network: dict = {}
         with patch(
-            "app.services.vpn_check_service._measure_download_speed",
+            "app.services.speed_measure.measure_download_speed",
             return_value={"ok": True, "mbps": 0.0, "bytes": 1, "url": "https://example/x"},
         ):
-            vpn._enrich_network_metrics(
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -473,7 +475,7 @@ class TestEnrichNetworkMetricsSpeedTest:
             },
             previous_speed_test_stats=previous_stats,
         )
-        vpn._enrich_network_metrics(
+        network_enrich._enrich_network_metrics(
             network,
             gateway=None,
             proxy_url=None,

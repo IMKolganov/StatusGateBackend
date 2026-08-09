@@ -200,14 +200,14 @@ class TestVpnNetnsHelpers:
         short = str(component.id).split("-")[0]
         popen = MagicMock()
         popen.poll.return_value = None
-        with patch("app.services.vpn_check_service.ensure_netns") as ensure:
-            with patch("app.services.vpn_check_service.subprocess.Popen", return_value=popen) as popen_ctor:
-                with patch.object(vpn, "_wait_for_tun_interface", return_value=f"tun-{short}"):
-                    with patch.object(vpn, "_tun_ipv4_addresses", return_value=[("10.51.15.5", 24)]):
-                        with patch.object(vpn, "_resolve_tun_gateway", return_value="10.51.15.1"):
-                            with patch("app.services.vpn_check_service.move_iface_to_netns") as move:
-                                with patch.object(vpn, "_interface_is_up", return_value=True):
-                                    with patch.object(vpn, "_read_tail", return_value="route-gateway 10.51.15.1"):
+        with patch("app.services.openvpn_session.ensure_netns") as ensure:
+            with patch("app.services.openvpn_session.subprocess.Popen", return_value=popen) as popen_ctor:
+                with patch("app.services.openvpn_session._wait_for_tun_interface", return_value=f"tun-{short}"):
+                    with patch("app.services.openvpn_session._tun_ipv4_addresses", return_value=[("10.51.15.5", 24)]):
+                        with patch("app.services.openvpn_session._resolve_tun_gateway", return_value="10.51.15.1"):
+                            with patch("app.services.openvpn_session.move_iface_to_netns") as move:
+                                with patch("app.services.openvpn_session._interface_is_up", return_value=True):
+                                    with patch("app.services.openvpn_session._read_tail", return_value="route-gateway 10.51.15.1"):
                                         result = vpn.start_openvpn_persistent_session(component)
         assert result.handle is not None
         assert result.handle.iface == f"tun-{short}"
@@ -236,7 +236,7 @@ class TestPersistentProbeHelpers:
             stdout="203.0.113.1\n__HTTP_CODE__:204",
             stderr="",
         )
-        with patch("app.services.vpn_check_service.subprocess.run", return_value=completed):
+        with patch("app.services.http_probe.subprocess.run", return_value=completed):
             result = vpn._probe_endpoint_via_curl("https://www.google.com/generate_204", 5, netns="sg-test")
         assert result["ok"] is True
         assert result["status_code"] == 204
@@ -244,7 +244,7 @@ class TestPersistentProbeHelpers:
 
     def test_probe_endpoint_via_curl_failure(self) -> None:
         completed = SimpleNamespace(returncode=28, stdout="", stderr="timeout")
-        with patch("app.services.vpn_check_service.subprocess.run", return_value=completed):
+        with patch("app.services.http_probe.subprocess.run", return_value=completed):
             result = vpn._probe_endpoint_via_curl("https://example.com", 5, netns="sg-test")
         assert result["ok"] is False
         assert "timeout" in result["error"]
@@ -273,11 +273,10 @@ class TestPersistentProbeHelpers:
             run_speed_test=False,
             last_successful_speed_test=last_success,
         )
-        with patch.object(vpn, "is_openvpn_persistent_session_up", return_value=True):
-            with patch.object(vpn, "_collect_network_details", return_value={"gateway": "10.8.0.1"}):
-                with patch.object(
-                    vpn,
-                    "_probe_endpoint",
+        with patch("app.services.openvpn_session.is_openvpn_persistent_session_up", return_value=True):
+            with patch("app.services.openvpn_session._collect_network_details", return_value={"gateway": "10.8.0.1"}):
+                with patch(
+                    "app.services.openvpn_session._probe_endpoint",
                     return_value={"ok": False, "url": component.check_url, "error": "timeout"},
                 ):
                     result = vpn.run_openvpn_persistent_probe(
@@ -305,7 +304,7 @@ class TestPersistentProbeHelpers:
             pid_path=MagicMock(),
             connect_time_ms=900,
         )
-        with patch.object(vpn, "is_openvpn_persistent_session_up", return_value=False):
+        with patch("app.services.openvpn_session.is_openvpn_persistent_session_up", return_value=False):
             result = vpn.run_openvpn_persistent_probe(
                 component,
                 handle,

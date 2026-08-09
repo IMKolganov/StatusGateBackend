@@ -28,9 +28,11 @@ from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
     extract_last_live_speed_test_from_details,
+    extract_last_live_speed_test_upload_from_details,
     extract_last_successful_speed_test,
     pick_staggered_speed_test_component_ids,
     resolve_speed_test_memory,
+    resolve_speed_test_upload_memory,
     should_run_speed_test,
 )
 from app.services.tunnel_ping_sampler import TunnelPingSampler
@@ -254,7 +256,20 @@ class _PersistentOpenVpnWorker(threading.Thread):
                 history_details=history_details,
                 history_checked_at=history.checked_at if history else None,
             )
+            (
+                previous_speed_test_upload,
+                last_successful_speed_test_upload,
+                previous_speed_test_upload_stats,
+            ) = resolve_speed_test_upload_memory(
+                latest_details,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
+            )
             last_live_speed_test = extract_last_live_speed_test_from_details(
+                latest_details, checked_at=checked_at
+            )
+            last_live_speed_test_upload = extract_last_live_speed_test_upload_from_details(
                 latest_details, checked_at=checked_at
             )
             allowed_ids = pick_staggered_speed_test_component_ids(vpn_components, settings, latest_map)
@@ -266,6 +281,10 @@ class _PersistentOpenVpnWorker(threading.Thread):
                 last_successful_speed_test=last_successful_speed_test,
                 previous_speed_test_stats=previous_speed_test_stats,
                 last_live_speed_test=last_live_speed_test,
+                previous_speed_test_upload=previous_speed_test_upload,
+                last_successful_speed_test_upload=last_successful_speed_test_upload,
+                previous_speed_test_upload_stats=previous_speed_test_upload_stats,
+                last_live_speed_test_upload=last_live_speed_test_upload,
             )
 
     def _persist_result(self, component: MonitoredComponent, result: CheckResult) -> None:

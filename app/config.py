@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     default_poll_interval_seconds: int = 60
     scheduler_interval_seconds: int = 30
 
+    # Network probe / speed-test endpoints (env overrides; values below are fallbacks).
+    default_speed_test_url_template: str = "https://speed.cloudflare.com/__down?bytes={bytes}"
+    cloudflare_speed_test_origin: str = "https://speed.cloudflare.com"
+    default_probe_url: str = "https://ifconfig.me/ip"
+    google_probe_url: str = "https://www.gstatic.com/generate_204"
+    internet_ping_host: str = "8.8.8.8"
+    vpn_netns_dns_servers: str = "1.1.1.1,8.8.8.8"
+
     google_client_id: str = ""
     google_client_secret: str = ""
 

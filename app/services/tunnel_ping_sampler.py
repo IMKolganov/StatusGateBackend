@@ -22,12 +22,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from app.core.probe_defaults import INTERNET_PING_HOST
 from app.database import SessionLocal
 from app.models.tunnel_ping_sample import GATEWAY_TARGET, INTERNET_TARGET, TunnelPingSample
 
 logger = logging.getLogger(__name__)
-
-INTERNET_PING_HOST = "8.8.8.8"
 SAMPLE_WINDOW_SECONDS = 60
 # 55 one-second pings leave headroom for parsing + persisting within the minute.
 PINGS_PER_WINDOW = 55
