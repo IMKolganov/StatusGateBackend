@@ -10,6 +10,7 @@ from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES, MAX_SPEED_TEST_BYTES, MonitoredComponentCreate
 from app.schemas.network import NetworkSummary
+from app.services import speed_measure
 from app.services import vpn_check_service as vpn
 from app.services.speed_test_config import DEFAULT_SPEED_TEST_URL_TEMPLATE, build_speed_test_url
 from app.services.health_check_service import run_health_check
@@ -112,6 +113,10 @@ class TestVpnHelpers:
             download_duration_ms=800,
             speed_test_ok=True,
             speed_test_error=None,
+            speed_test_min_mbps=5.24,
+            speed_test_max_mbps=5.24,
+            speed_test_avg_mbps=5.24,
+            speed_test_sample_count=1,
         )
 
     def test_public_network_summary_failed_speed_test(self) -> None:
@@ -216,6 +221,85 @@ class TestVpnHelpers:
         assert summary.speed_test_last_success_at == "2026-07-20T00:10:00+00:00"
         assert summary.speed_test_measured_at == "2026-07-20T00:10:00+00:00"
 
+    def test_public_network_summary_rejects_zero_mbps_cached_success(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": True,
+                    "mbps": 0.0,
+                    "bytes": 0,
+                    "duration_ms": 1200,
+                    "cached": True,
+                    "deferred": True,
+                    "measured_at": "2026-07-27T17:00:00+00:00",
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "mbps": 0.0,
+                    "bytes": 0,
+                    "duration_ms": 1200,
+                    "measured_at": "2026-07-27T17:00:00+00:00",
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps is None
+        assert summary.speed_test_ok is False
+        assert summary.speed_test_showing_last_success is not True
+        assert summary.speed_test_error == "Speed test downloaded no data"
+
+    def test_public_network_summary_includes_speed_stats(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": True,
+                    "mbps": 114.6,
+                    "bytes": 10485760,
+                    "duration_ms": 800,
+                    "measured_at": "2026-07-27T17:00:00+00:00",
+                },
+                "speed_test_stats": {
+                    "min_mbps": 80.1,
+                    "max_mbps": 135.3,
+                    "avg_mbps": 97.4,
+                    "sample_count": 4,
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.speed_test_min_mbps == 80.1
+        assert summary.speed_test_max_mbps == 135.3
+        assert summary.speed_test_avg_mbps == 97.4
+        assert summary.speed_test_sample_count == 4
+
+    def test_public_network_summary_seeds_stats_from_last_success(self) -> None:
+        details = {
+            "network": {
+                "speed_test": {
+                    "ok": False,
+                    "error": "Speed test deferred (waiting for a free slot among VPN services)",
+                    "deferred": True,
+                },
+                "speed_test_last_success": {
+                    "ok": True,
+                    "mbps": 91.88,
+                    "bytes": 10485760,
+                    "duration_ms": 913,
+                    "measured_at": "2026-07-27T16:10:12+00:00",
+                },
+            }
+        }
+        summary = public_network_summary(details)
+        assert summary is not None
+        assert summary.download_mbps == 91.88
+        assert summary.speed_test_showing_last_success is True
+        assert summary.speed_test_min_mbps == 91.88
+        assert summary.speed_test_max_mbps == 91.88
+        assert summary.speed_test_avg_mbps == 91.88
+        assert summary.speed_test_sample_count == 1
+
     def test_format_speed_test_error_from_httpx_message(self) -> None:
         raw = (
             "Client error '429 Too Many Requests' for url "
@@ -267,9 +351,9 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
             def __exit__(self, *args):
                 return False
 
-        with patch("app.services.vpn_check_service.httpx.Client", return_value=FakeClient()):
-            with patch("app.services.vpn_check_service.time.perf_counter", side_effect=[0.0, 1.0]):
-                result = vpn._measure_download_speed("https://example.test/down", proxy_url=None, timeout=10)
+        with patch("app.services.speed_measure.httpx.Client", return_value=FakeClient()):
+            with patch("app.services.speed_measure.time.perf_counter", side_effect=[0.0, 1.0]):
+                result = speed_measure.measure_download_speed("https://example.test/down", proxy_url=None, timeout=10)
         assert result is not None
         assert result["ok"] is True
         assert result["bytes"] == 1024
@@ -282,14 +366,14 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
         assert public_network_summary({"network": "bad"}) is None
 
     def test_read_dns_servers(self) -> None:
-        with patch("app.services.vpn_check_service.Path") as path_cls:
+        with patch("app.services.network_enrich.Path") as path_cls:
             path_cls.return_value.exists.return_value = True
             path_cls.return_value.read_text.return_value = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
             assert vpn._read_dns_servers() == ["1.1.1.1", "8.8.8.8"]
 
     def test_list_tun_interfaces(self) -> None:
         payload = json.dumps([{"ifname": "eth0"}, {"ifname": "tun0"}, {"ifname": "tun1"}])
-        with patch("app.services.vpn_check_service.subprocess.check_output", return_value=payload):
+        with patch("app.services.tun_iface.subprocess.check_output", return_value=payload):
             assert vpn._list_tun_interfaces() == ["tun0", "tun1"]
 
     def test_interface_is_up(self) -> None:
@@ -301,18 +385,18 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
                 }
             ]
         )
-        with patch("app.services.vpn_check_service.subprocess.check_output", return_value=payload):
+        with patch("app.services.tun_iface.subprocess.check_output", return_value=payload):
             assert vpn._interface_is_up("tun0") is True
 
     def test_interface_is_up_without_address(self) -> None:
         payload = json.dumps([{"flags": ["UP"], "addr_info": []}])
-        with patch("app.services.vpn_check_service.subprocess.check_output", return_value=payload):
+        with patch("app.services.tun_iface.subprocess.check_output", return_value=payload):
             assert vpn._interface_is_up("tun0") is False
 
     def test_probe_endpoint_success(self) -> None:
         request = httpx.Request("GET", "https://ifconfig.me/ip")
         response = httpx.Response(200, text="203.0.113.1\n", request=request)
-        with patch("app.services.vpn_check_service.httpx.Client") as client_cls:
+        with patch("app.services.http_probe.httpx.Client") as client_cls:
             client_cls.return_value.__enter__.return_value.get.return_value = response
             probe = vpn._probe_endpoint("https://ifconfig.me/ip", timeout=5)
         assert probe["ok"] is True
@@ -320,7 +404,7 @@ rtt min/avg/max/mdev = 9.800/10.500/11.200/0.450 ms
         assert probe["status_code"] == 200
 
     def test_probe_endpoint_failure(self) -> None:
-        with patch("app.services.vpn_check_service.httpx.Client") as client_cls:
+        with patch("app.services.http_probe.httpx.Client") as client_cls:
             client_cls.return_value.__enter__.return_value.get.side_effect = httpx.ConnectError("refused")
             probe = vpn._probe_endpoint("https://ifconfig.me/ip", timeout=5)
         assert probe["ok"] is False

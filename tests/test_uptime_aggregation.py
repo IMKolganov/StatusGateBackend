@@ -2,9 +2,12 @@ from datetime import UTC, date, datetime
 
 from app.models.enums import CheckOutcome
 from app.services.uptime_stats import (
+    DayCheckStats,
+    availability_from_stats,
     availability_percent,
     compute_downtime_seconds,
     status_from_outcomes,
+    status_from_stats,
 )
 
 
@@ -27,6 +30,12 @@ class TestUptimeAggregation:
     def test_degraded_counts_as_available(self) -> None:
         outcomes = [CheckOutcome.DEGRADED.value]
         assert status_from_outcomes(outcomes) == "operational"
+
+    def test_stats_helpers_match_outcome_lists(self) -> None:
+        outcomes = [CheckOutcome.UP.value] * 95 + [CheckOutcome.TIMEOUT.value] * 5
+        stats = DayCheckStats.from_outcomes(outcomes)
+        assert availability_from_stats(stats) == availability_percent(outcomes)
+        assert status_from_stats(stats) == status_from_outcomes(outcomes)
 
 
 class TestDowntimeCalculation:

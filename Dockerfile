@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.14-slim AS base
 
 WORKDIR /app
 
@@ -26,6 +26,15 @@ COPY alembic.ini .
 COPY alembic ./alembic
 COPY app ./app
 
-EXPOSE 8000
+# Test image: needs Postgres (compose service `backend-test` + `db`).
+FROM base AS test
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
+COPY pytest.ini .
+COPY tests ./tests
+ENV JWT_SECRET=compose-test-jwt-secret-at-least-32-characters
+CMD ["pytest", "-q", "--tb=line"]
 
+FROM base AS runtime
+EXPOSE 8000
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

@@ -16,6 +16,7 @@ from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 from app.schemas.monitored_component import MonitoredComponentCreate
 from app.schemas.monitoring import MonitoringSettingsUpdate
+from app.services import network_enrich
 from app.services import vpn_check_service as vpn
 from app.services.monitoring_admin_service import MonitoringAdminService
 from app.services.monitoring_service import HealthCheckRunner
@@ -248,8 +249,8 @@ class TestEnrichNetworkMetricsSpeedTest:
             run_speed_test=False,
             previous_speed_test=previous,
         )
-        with patch("app.services.vpn_check_service._measure_download_speed") as measure:
-            vpn._enrich_network_metrics(
+        with patch("app.services.speed_measure.measure_download_speed") as measure:
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -276,10 +277,11 @@ class TestEnrichNetworkMetricsSpeedTest:
             last_successful_speed_test=last_success,
         )
         with (
-            patch("app.services.vpn_check_service.try_acquire_speed_test_slot", return_value=False),
-            patch("app.services.vpn_check_service._measure_download_speed") as measure,
+            patch("app.services.speed_test_config.try_acquire_speed_test_slot", return_value=False),
+            patch("app.services.network_enrich.try_acquire_speed_test_slot", return_value=False),
+            patch("app.services.speed_measure.measure_download_speed") as measure,
         ):
-            vpn._enrich_network_metrics(
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -300,8 +302,8 @@ class TestEnrichNetworkMetricsSpeedTest:
             previous_speed_test=None,
             last_successful_speed_test=None,
         )
-        with patch("app.services.vpn_check_service._measure_download_speed") as measure:
-            vpn._enrich_network_metrics(
+        with patch("app.services.speed_measure.measure_download_speed") as measure:
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url=None,
@@ -329,8 +331,8 @@ class TestEnrichNetworkMetricsSpeedTest:
         network: dict = {}
         context = SpeedTestRunContext(url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE, run_speed_test=True)
         measured = {"ok": True, "mbps": 10.0, "bytes": 524288, "url": "https://speed.cloudflare.com/__down?bytes=524288"}
-        with patch("app.services.vpn_check_service._measure_download_speed", return_value=measured) as measure:
-            vpn._enrich_network_metrics(
+        with patch("app.services.speed_measure.measure_download_speed", return_value=measured) as measure:
+            network_enrich._enrich_network_metrics(
                 network,
                 gateway=None,
                 proxy_url="socks5://127.0.0.1:1080",
@@ -343,6 +345,147 @@ class TestEnrichNetworkMetricsSpeedTest:
         assert network["speed_test"]["mbps"] == 10.0
         assert isinstance(network["speed_test"].get("measured_at"), str)
         assert network["speed_test_last_success"] == network["speed_test"]
+        assert network["speed_test_stats"] == {
+            "min_mbps": 10.0,
+            "max_mbps": 10.0,
+            "avg_mbps": 10.0,
+            "sample_count": 1,
+        }
+
+    def test_enrich_accumulates_stats_across_different_speeds(self) -> None:
+        from app.services.speed_test_config import reset_cloudflare_speed_test_slot_for_tests
+
+        reset_cloudflare_speed_test_slot_for_tests()
+        previous_stats = {
+            "min_mbps": 80.0,
+            "max_mbps": 120.0,
+            "avg_mbps": 100.0,
+            "sample_count": 2,
+        }
+        context = SpeedTestRunContext(
+            url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE,
+            run_speed_test=True,
+            previous_speed_test_stats=previous_stats,
+            last_successful_speed_test={
+                "ok": True,
+                "mbps": 120.0,
+                "bytes": 10485760,
+                "measured_at": "2026-07-27T10:00:00+00:00",
+            },
+        )
+        network: dict = {}
+        measured = {
+            "ok": True,
+            "mbps": 50.0,
+            "bytes": 10485760,
+            "url": "https://speed.cloudflare.com/__down?bytes=10485760",
+        }
+        with patch("app.services.speed_measure.measure_download_speed", return_value=measured):
+            network_enrich._enrich_network_metrics(
+                network,
+                gateway=None,
+                proxy_url=None,
+                iface=None,
+                timeout=30,
+                speed_test_context=context,
+            )
+        assert network["speed_test"]["mbps"] == 50.0
+        assert network["speed_test_stats"]["min_mbps"] == 50.0
+        assert network["speed_test_stats"]["max_mbps"] == 120.0
+        assert network["speed_test_stats"]["avg_mbps"] == 83.33
+        assert network["speed_test_stats"]["sample_count"] == 3
+
+        summary = vpn.public_network_summary({"network": network})
+        assert summary is not None
+        assert summary.speed_test_min_mbps == 50.0
+        assert summary.speed_test_max_mbps == 120.0
+        assert summary.speed_test_avg_mbps == 83.33
+        assert summary.speed_test_sample_count == 3
+
+    def test_enrich_zero_byte_result_keeps_previous_stats(self) -> None:
+        from app.services.speed_test_config import reset_cloudflare_speed_test_slot_for_tests
+
+        reset_cloudflare_speed_test_slot_for_tests()
+        previous_stats = {
+            "min_mbps": 90.0,
+            "max_mbps": 140.0,
+            "avg_mbps": 115.0,
+            "sample_count": 4,
+        }
+        last_success = {
+            "ok": True,
+            "mbps": 140.0,
+            "bytes": 10485760,
+            "measured_at": "2026-07-27T11:00:00+00:00",
+        }
+        context = SpeedTestRunContext(
+            url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE,
+            run_speed_test=True,
+            previous_speed_test_stats=previous_stats,
+            last_successful_speed_test=last_success,
+        )
+        network: dict = {}
+        with patch(
+            "app.services.speed_measure.measure_download_speed",
+            return_value={"ok": True, "mbps": 0.0, "bytes": 1, "url": "https://example/x"},
+        ):
+            network_enrich._enrich_network_metrics(
+                network,
+                gateway=None,
+                proxy_url=None,
+                iface=None,
+                timeout=30,
+                speed_test_context=context,
+            )
+        assert network["speed_test"]["ok"] is False
+        assert "no data" in network["speed_test"]["error"].lower()
+        assert network["speed_test_last_success"] == last_success
+        assert network["speed_test_stats"] == previous_stats
+
+        summary = vpn.public_network_summary({"network": network})
+        assert summary is not None
+        assert summary.download_mbps == 140.0
+        assert summary.speed_test_showing_last_success is True
+        assert summary.speed_test_min_mbps == 90.0
+        assert summary.speed_test_max_mbps == 140.0
+        assert summary.speed_test_avg_mbps == 115.0
+
+    def test_deferred_cache_preserves_speed_stats(self) -> None:
+        network: dict = {}
+        previous_stats = {
+            "min_mbps": 70.0,
+            "max_mbps": 130.0,
+            "avg_mbps": 100.0,
+            "sample_count": 5,
+        }
+        context = SpeedTestRunContext(
+            url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE,
+            run_speed_test=False,
+            previous_speed_test={
+                "ok": True,
+                "mbps": 110.0,
+                "bytes": 10485760,
+                "measured_at": "2026-07-27T12:00:00+00:00",
+            },
+            last_successful_speed_test={
+                "ok": True,
+                "mbps": 110.0,
+                "bytes": 10485760,
+                "measured_at": "2026-07-27T12:00:00+00:00",
+            },
+            previous_speed_test_stats=previous_stats,
+        )
+        network_enrich._enrich_network_metrics(
+            network,
+            gateway=None,
+            proxy_url=None,
+            iface=None,
+            timeout=30,
+            speed_test_context=context,
+        )
+        assert network["speed_test"]["mbps"] == 110.0
+        assert network["speed_test"]["cached"] is True
+        assert network["speed_test_stats"] == previous_stats
 
 
 class TestHealthCheckRunnerSpeedTestContext:
@@ -392,6 +535,168 @@ class TestHealthCheckRunnerSpeedTestContext:
         assert context.url_template == "https://cdn.example.com/x?b={bytes}"
         assert context.run_speed_test is True
         assert context.previous_speed_test is None
+
+    def test_run_check_recovers_speed_test_memory_after_outage(self, db_session: Session) -> None:
+        from app.models.project import Project
+
+        project = Project(name="Outage", slug="outage-proj", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+
+        component = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Helsinki recover",
+            slug="helsinki-recover",
+            check_url="https://ifconfig.me/ip",
+            check_method="GET",
+            check_type=CheckType.OPENVPN.value,
+            check_config={"config_text": "client\ndev tun\nremote x 1194\n"},
+            expected_status_code=200,
+            timeout_seconds=60,
+            speed_test_interval_seconds=3600,
+            speed_test_enabled=True,
+            is_active=True,
+        )
+        db_session.add(component)
+        db_session.flush()
+
+        good_at = datetime.now(UTC) - timedelta(days=3)
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component.id,
+                checked_at=good_at,
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "bytes": 10485760,
+                            "mbps": 14.76,
+                            "measured_at": good_at.isoformat(),
+                        },
+                        "speed_test_last_success": {
+                            "ok": True,
+                            "bytes": 10485760,
+                            "mbps": 14.76,
+                            "measured_at": good_at.isoformat(),
+                        },
+                        "speed_test_stats": {
+                            "min_mbps": 14.76,
+                            "max_mbps": 14.76,
+                            "avg_mbps": 14.76,
+                            "sample_count": 1,
+                        },
+                    }
+                },
+            )
+        )
+        # Empty down/timeout rows wipe network — previously this broke carry-forward.
+        for minutes in (1, 2, 3):
+            db_session.add(
+                CheckResult(
+                    monitored_component_id=component.id,
+                    checked_at=good_at + timedelta(minutes=minutes),
+                    outcome="down" if minutes == 1 else "timeout",
+                    error_message="OpenVPN tunnel is down" if minutes == 1 else "OpenVPN tunnel did not come up in time",
+                    details={"network": {"connect_time_ms": 511}} if minutes == 1 else None,
+                )
+            )
+        db_session.commit()
+
+        runner = HealthCheckRunner(db_session)
+        captured: dict = {}
+
+        def fake_run_health_check(comp, *, speed_test_context=None):
+            captured["context"] = speed_test_context
+            return CheckResult(
+                monitored_component_id=comp.id,
+                checked_at=datetime.now(UTC),
+                outcome="up",
+                latency_ms=100,
+            )
+
+        with patch("app.services.monitoring_service.run_health_check", side_effect=fake_run_health_check):
+            runner.run_check(component)
+
+        context = captured["context"]
+        assert context is not None
+        assert context.last_successful_speed_test is not None
+        assert context.last_successful_speed_test["mbps"] == 14.76
+        assert context.previous_speed_test_stats == {
+            "min_mbps": 14.76,
+            "max_mbps": 14.76,
+            "avg_mbps": 14.76,
+            "sample_count": 1,
+        }
+
+    def test_latest_with_meaningful_speed_test_skips_zero_mbps(self, db_session: Session) -> None:
+        from app.models.project import Project
+        from app.services.monitoring_service import CheckResultRepository
+
+        project = Project(name="Zero", slug="zero-proj", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+
+        component = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Zero VPN",
+            slug="zero-vpn",
+            check_url="https://ifconfig.me/ip",
+            check_method="GET",
+            check_type=CheckType.OPENVPN.value,
+            check_config={"config_text": "client\ndev tun\nremote x 1194\n"},
+            expected_status_code=200,
+            timeout_seconds=60,
+            speed_test_enabled=True,
+            is_active=True,
+        )
+        db_session.add(component)
+        db_session.flush()
+
+        good_at = datetime.now(UTC) - timedelta(hours=2)
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component.id,
+                checked_at=good_at,
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {
+                            "ok": True,
+                            "bytes": 10485760,
+                            "mbps": 88.0,
+                            "measured_at": good_at.isoformat(),
+                        },
+                        "speed_test_last_success": {
+                            "ok": True,
+                            "bytes": 10485760,
+                            "mbps": 88.0,
+                            "measured_at": good_at.isoformat(),
+                        },
+                    }
+                },
+            )
+        )
+        db_session.add(
+            CheckResult(
+                monitored_component_id=component.id,
+                checked_at=good_at + timedelta(minutes=5),
+                outcome="up",
+                details={
+                    "network": {
+                        "speed_test": {"ok": True, "bytes": 0, "mbps": 0.0},
+                    }
+                },
+            )
+        )
+        db_session.commit()
+
+        found = CheckResultRepository(db_session).latest_with_meaningful_speed_test(component.id)
+        assert found is not None
+        assert found.checked_at == good_at
+        assert found.details["network"]["speed_test"]["mbps"] == 88.0
 
     def test_run_due_checks_staggers_speed_tests_to_one_vpn(self, db_session: Session) -> None:
         from app.models.project import Project

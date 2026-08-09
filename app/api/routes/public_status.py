@@ -7,7 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.schemas.incident import PublicProjectHistory
-from app.schemas.public_status import PublicProjectStatus, PublicProjectSummary, PublicSystemStatus
+from app.schemas.public_status import (
+    PublicProjectStatus,
+    PublicProjectSummary,
+    PublicSystemStatus,
+    PublicTunnelMetrics,
+)
 from app.services.incident_service import IncidentService
 from app.services.public_status_service import PublicStatusService
 
@@ -54,3 +59,16 @@ def get_public_system_status(
     service: PublicStatusService = Depends(get_public_status_service),
 ) -> PublicSystemStatus:
     return service.get_system_status(slug, end=end, days=days)
+
+
+@router.get(
+    "/projects/{slug}/services/{service_slug}/tunnel-metrics",
+    response_model=PublicTunnelMetrics,
+)
+def get_public_tunnel_metrics(
+    slug: str,
+    service_slug: str,
+    hours: int = Query(2, ge=2, le=24, description="Sliding window length in hours."),
+    service: PublicStatusService = Depends(get_public_status_service),
+) -> PublicTunnelMetrics:
+    return service.get_tunnel_metrics(slug, service_slug, hours=hours)

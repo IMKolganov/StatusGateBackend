@@ -96,6 +96,14 @@ class TestAuthLogin:
         assert me.status_code == 200
         assert _data(me)["email"] == "login@example.com"
 
+    def test_me_anonymous_returns_no_content(self, client: TestClient) -> None:
+        response = client.get("/api/auth/me")
+        # Middleware normalizes empty auth to success envelope with null data (no 401 noise).
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert body["data"] is None
+
     def test_invalid_credentials_rejected(self, client: TestClient) -> None:
         client.post(
             "/api/auth/register",

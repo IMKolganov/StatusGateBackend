@@ -6,8 +6,12 @@ from sqlalchemy import Integer, String
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.speed_test_defaults import (
+    DEFAULT_SPEED_TEST_INTERVAL_SECONDS,
+    FALLBACK_SPEED_TEST_URL_TEMPLATE,
+    default_speed_test_url_template,
+)
 from app.models.base import BaseModel
-from app.core.speed_test_defaults import DEFAULT_SPEED_TEST_INTERVAL_SECONDS, DEFAULT_SPEED_TEST_URL_TEMPLATE
 
 MONITORING_SETTINGS_ID = UUID("00000000-0000-4000-8000-000000000010")
 
@@ -21,8 +25,8 @@ class MonitoringSettings(BaseModel[UUID]):
     default_speed_test_url_template: Mapped[str] = mapped_column(
         String(2048),
         nullable=False,
-        default=DEFAULT_SPEED_TEST_URL_TEMPLATE,
-        server_default=DEFAULT_SPEED_TEST_URL_TEMPLATE,
+        default=default_speed_test_url_template,
+        server_default=FALLBACK_SPEED_TEST_URL_TEMPLATE,
     )
     default_speed_test_interval_seconds: Mapped[int] = mapped_column(
         Integer,

@@ -8,7 +8,13 @@ from app.database import get_db
 from app.models.account import Account
 from app.services.auth_service import AuthService
 
-__all__ = ["get_auth_service", "get_current_account", "get_db", "require_access_roles"]
+__all__ = [
+    "get_auth_service",
+    "get_current_account",
+    "get_optional_account",
+    "get_db",
+    "require_access_roles",
+]
 
 
 def get_auth_service(db: Session = Depends(get_db)) -> Generator[AuthService, None, None]:
@@ -23,6 +29,19 @@ def get_current_account(
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return auth_service.get_account_from_access_token(token)
+
+
+def get_optional_account(
+    request: Request,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> Account | None:
+    token = get_access_token_from_request(request)
+    if not token:
+        return None
+    try:
+        return auth_service.get_account_from_access_token(token)
+    except HTTPException:
+        return None
 
 
 def require_access_roles(*allowed_roles: str):
