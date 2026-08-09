@@ -21,7 +21,7 @@ from app.models.enums import CheckOutcome, CheckType
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES
 from app.services.host_wan_speed import attach_host_wan_baseline_to_network, ephemeral_openvpn_host_route_guard
-from app.services.http_probe import DEFAULT_PROBE_URL, GOOGLE_PROBE_URL, _probe_endpoint, _probe_endpoint_via_curl
+from app.services.http_probe import default_probe_url, google_probe_url, _probe_endpoint, _probe_endpoint_via_curl
 from app.services.network_enrich import (
     _apply_cached_speed_test,
     _apply_cached_speed_test_upload,
@@ -68,8 +68,8 @@ __all__ = [
     "OpenVpnSessionHandle",
     "OpenVpnStartResult",
     "RECONNECT_DELAY_SECONDS",
-    "DEFAULT_PROBE_URL",
-    "GOOGLE_PROBE_URL",
+    "default_probe_url",
+    "google_probe_url",
     "run_vpn_health_check",
     "start_openvpn_persistent_session",
     "stop_openvpn_persistent_session",
@@ -133,7 +133,7 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
     config_text = _config_text(component)
-    probe_url = component.check_url or DEFAULT_PROBE_URL
+    probe_url = component.check_url or default_probe_url()
     timeout = component.timeout_seconds
 
     with ephemeral_openvpn_host_route_guard():
@@ -196,7 +196,7 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
 
                 probe = _probe_endpoint(probe_url, timeout=min(15, timeout))
                 network["probe"] = probe
-                network["google_probe"] = _probe_endpoint(GOOGLE_PROBE_URL, timeout=min(10, timeout))
+                network["google_probe"] = _probe_endpoint(google_probe_url(), timeout=min(10, timeout))
 
                 if probe.get("ok"):
                     speed_test_bytes = _speed_test_bytes_for(component)
@@ -253,7 +253,7 @@ def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedT
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
     config_text = _config_text(component)
-    probe_url = component.check_url or DEFAULT_PROBE_URL
+    probe_url = component.check_url or default_probe_url()
     timeout = component.timeout_seconds
 
     try:
@@ -316,7 +316,7 @@ def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedT
 
             probe_result = _probe_endpoint(probe_url, timeout=min(15, timeout), proxy_url=proxy_url)
             network["probe"] = probe_result
-            network["google_probe"] = _probe_endpoint(GOOGLE_PROBE_URL, timeout=min(10, timeout), proxy_url=proxy_url)
+            network["google_probe"] = _probe_endpoint(google_probe_url(), timeout=min(10, timeout), proxy_url=proxy_url)
 
             probe_ok = bool(probe_result.get("ok"))
             if probe_ok:
@@ -395,7 +395,7 @@ def _wait_for_proxy(proxy_url: str, timeout: float) -> bool:
     while time.time() < deadline:
         try:
             with httpx.Client(proxy=proxy_url, timeout=2.0) as client:
-                client.get(DEFAULT_PROBE_URL)
+                client.get(default_probe_url())
             return True
         except httpx.HTTPError:
             time.sleep(0.5)

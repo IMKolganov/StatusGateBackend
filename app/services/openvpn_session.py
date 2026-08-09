@@ -16,7 +16,7 @@ from app.models.enums import CheckOutcome, ConnectionMode
 from app.models.monitored_component import MonitoredComponent
 from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES
 from app.services.host_wan_speed import attach_host_wan_baseline_to_network
-from app.services.http_probe import DEFAULT_PROBE_URL, GOOGLE_PROBE_URL, _probe_endpoint
+from app.services.http_probe import default_probe_url, google_probe_url, _probe_endpoint
 from app.services.network_enrich import (
     _apply_cached_speed_test,
     _apply_cached_speed_test_upload,
@@ -203,7 +203,7 @@ def run_openvpn_persistent_probe(
 ) -> CheckResult:
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
-    probe_url = component.check_url or DEFAULT_PROBE_URL
+    probe_url = component.check_url or default_probe_url()
     timeout = component.timeout_seconds
 
     if not is_openvpn_persistent_session_up(handle):
@@ -230,7 +230,7 @@ def run_openvpn_persistent_probe(
 
     probe = _probe_endpoint(probe_url, timeout=min(15, timeout), netns=handle.netns)
     network["probe"] = probe
-    network["google_probe"] = _probe_endpoint(GOOGLE_PROBE_URL, timeout=min(10, timeout), netns=handle.netns)
+    network["google_probe"] = _probe_endpoint(google_probe_url(), timeout=min(10, timeout), netns=handle.netns)
 
     if probe.get("ok"):
         speed_test_bytes = _speed_test_bytes_for(component)

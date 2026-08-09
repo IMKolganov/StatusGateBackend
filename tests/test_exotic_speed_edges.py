@@ -38,7 +38,7 @@ def test_vpn_netns_nameserver_lines_parses_and_falls_back(monkeypatch) -> None:
 
 def test_is_cloudflare_speed_test_template_respects_origin(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.services.speed_test_config.CLOUDFLARE_SPEED_TEST_ORIGIN",
+        "app.core.speed_test_defaults.settings.cloudflare_speed_test_origin",
         "https://speed.example.test",
     )
     assert is_cloudflare_speed_test_template("https://speed.example.test/__down?bytes={bytes}")

@@ -13,10 +13,11 @@ from uuid import UUID
 from app.core.speed_test_defaults import (
     CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE,
     CLOUDFLARE_SPEED_TEST_MIN_GAP_SECONDS,
-    CLOUDFLARE_SPEED_TEST_ORIGIN,
     DEFAULT_SPEED_TEST_URL_TEMPLATE,
     SPEED_TEST_MIN_GAP_SECONDS,
     SPEED_TEST_RATE_LIMIT_BACKOFF_SECONDS,
+    cloudflare_speed_test_origin,
+    default_speed_test_url_template,
 )
 from app.models.check_result import CheckResult
 from app.models.monitored_component import MonitoredComponent
@@ -65,7 +66,7 @@ class SpeedTestRunContext:
 
     @classmethod
     def default(cls) -> SpeedTestRunContext:
-        return cls(url_template=DEFAULT_SPEED_TEST_URL_TEMPLATE, run_speed_test=True)
+        return cls(url_template=default_speed_test_url_template(), run_speed_test=True)
 
 
 def reset_cloudflare_speed_test_slot_for_tests() -> None:
@@ -76,7 +77,7 @@ def reset_cloudflare_speed_test_slot_for_tests() -> None:
 
 
 def is_cloudflare_speed_test_template(template: str) -> bool:
-    origin = CLOUDFLARE_SPEED_TEST_ORIGIN.rstrip("/")
+    origin = cloudflare_speed_test_origin()
     return template.strip().startswith(f"{origin}/")
 
 
@@ -133,7 +134,7 @@ def build_speed_test_upload_url(template: str) -> str | None:
 def effective_speed_test_url_template(component: MonitoredComponent, settings: MonitoringSettings) -> str:
     if component.speed_test_url_template:
         return component.speed_test_url_template.strip()
-    template = settings.default_speed_test_url_template or DEFAULT_SPEED_TEST_URL_TEMPLATE
+    template = settings.default_speed_test_url_template or default_speed_test_url_template()
     return template.strip()
 
 
@@ -306,7 +307,7 @@ def speed_test_rate_warning(
     if per_minute <= CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE:
         return None
 
-    host = CLOUDFLARE_SPEED_TEST_ORIGIN.removeprefix("https://").removeprefix("http://").rstrip("/")
+    host = cloudflare_speed_test_origin().removeprefix("https://").removeprefix("http://").rstrip("/")
     return (
         f"{len(active_vpn)} active VPN services may trigger about {per_minute:.1f} speed-test HTTP requests "
         f"per minute on {host} from this server (Cloudflare has no published limit; HTTP 429 may occur above ~"

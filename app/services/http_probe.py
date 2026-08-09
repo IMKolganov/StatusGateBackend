@@ -8,9 +8,27 @@ from typing import Any
 
 import httpx
 
-from app.core.probe_defaults import DEFAULT_PROBE_URL, GOOGLE_PROBE_URL
+from app.core.probe_defaults import default_probe_url, google_probe_url
 
-__all__ = ["DEFAULT_PROBE_URL", "GOOGLE_PROBE_URL", "_probe_endpoint", "_probe_endpoint_via_curl"]
+__all__ = [
+    "DEFAULT_PROBE_URL",
+    "GOOGLE_PROBE_URL",
+    "default_probe_url",
+    "google_probe_url",
+    "_probe_endpoint",
+    "_probe_endpoint_via_curl",
+]
+
+
+def __getattr__(name: str) -> str:
+    # Keep `from http_probe import DEFAULT_PROBE_URL` working for attribute re-exports
+    # while allowing live Settings when accessed as http_probe.DEFAULT_PROBE_URL.
+    if name == "DEFAULT_PROBE_URL":
+        return default_probe_url()
+    if name == "GOOGLE_PROBE_URL":
+        return google_probe_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 def _probe_endpoint(
     url: str,
@@ -91,5 +109,3 @@ def _probe_endpoint_via_curl(url: str, timeout: float, *, netns: str) -> dict[st
             "error": str(exc),
             "latency_ms": int((time.perf_counter() - started) * 1000),
         }
-
-

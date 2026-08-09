@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from app.config import settings
-from app.core.speed_test_defaults import DEFAULT_SPEED_TEST_INTERVAL_SECONDS, DEFAULT_SPEED_TEST_URL_TEMPLATE
+from app.core.speed_test_defaults import DEFAULT_SPEED_TEST_INTERVAL_SECONDS, default_speed_test_url_template
 from app.models.monitoring_settings import MonitoringSettings
 from app.services.speed_test_config import (
     build_speed_test_upload_url,
@@ -318,7 +318,7 @@ def run_host_wan_speed_if_due(
 
     from app.services import speed_measure
 
-    template = (settings_row.default_speed_test_url_template or DEFAULT_SPEED_TEST_URL_TEMPLATE).strip()
+    template = (settings_row.default_speed_test_url_template or default_speed_test_url_template()).strip()
     download_url = build_speed_test_url(template, bytes_count)
     upload_url = build_speed_test_upload_url(template)
     timeout = 30.0

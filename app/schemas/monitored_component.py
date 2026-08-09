@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.probe_defaults import DEFAULT_PROBE_URL
+from app.core.probe_defaults import default_probe_url
 from app.models.enums import VPN_CHECK_TYPES, ConnectionMode
 from app.schemas.network import NetworkSummary, VpnCheckConfig
 from app.services.speed_test_config import validate_speed_test_url_template
@@ -51,7 +51,7 @@ class MonitoredComponentCreate(BaseModel):
                 raise ValueError("check_config is required for VPN check types")
             VpnCheckConfig.model_validate(self.check_config)
             if not self.check_url.strip():
-                self.check_url = DEFAULT_PROBE_URL
+                self.check_url = default_probe_url()
             if self.timeout_seconds < 30:
                 self.timeout_seconds = 30
             if self.speed_test_url_template is not None:

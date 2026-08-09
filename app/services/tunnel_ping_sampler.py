@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from app.core.probe_defaults import INTERNET_PING_HOST
+from app.core.probe_defaults import internet_ping_host
 from app.database import SessionLocal
 from app.models.tunnel_ping_sample import GATEWAY_TARGET, INTERNET_TARGET, TunnelPingSample
 
@@ -83,7 +83,7 @@ class TunnelPingSampler(threading.Thread):
             "Continuous tunnel ping started for component %s (gateway=%s, internet=%s)",
             self._component_id,
             self._gateway,
-            INTERNET_PING_HOST,
+            internet_ping_host(),
         )
         while not self._stop.is_set():
             window_started = datetime.now(UTC)
@@ -102,7 +102,7 @@ class TunnelPingSampler(threading.Thread):
         logger.info("Continuous tunnel ping stopped for component %s", self._component_id)
 
     def _targets(self) -> list[tuple[str, str]]:
-        targets = [(INTERNET_TARGET, INTERNET_PING_HOST)]
+        targets = [(INTERNET_TARGET, internet_ping_host())]
         if self._gateway:
             targets.insert(0, (GATEWAY_TARGET, self._gateway))
         return targets
