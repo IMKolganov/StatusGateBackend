@@ -634,36 +634,59 @@ def _build_tunnel_metric_point(
         else {}
     )
 
-    def _extract_speed(payload: dict[str, Any]) -> tuple[
-        float | None, int | None, int | None, bool | None, bool | None, str | None
-    ]:
+    def _extract_speed(
+        payload: dict[str, Any],
+        last_success: dict[str, Any] | None = None,
+    ) -> tuple[float | None, int | None, int | None, bool | None, bool | None, str | None]:
         mbps: float | None = None
         bytes_count: int | None = None
         duration_ms: int | None = None
         cached: bool | None = None
         ok: bool | None = None
         measured_at = payload.get("measured_at") if isinstance(payload.get("measured_at"), str) else None
-        if not payload:
-            return mbps, bytes_count, duration_ms, cached, ok, measured_at
-        if payload.get("ok") is True:
+
+        def _from_success(source: dict[str, Any], *, as_cached: bool) -> bool:
+            nonlocal mbps, bytes_count, duration_ms, cached, ok, measured_at
+            value = _as_float(source.get("mbps"))
+            if value is None or value <= 0:
+                return False
+            mbps = value
+            bytes_count = _as_int(source.get("bytes"))
+            duration_ms = _as_int(source.get("duration_ms"))
+            cached = as_cached or bool(source.get("cached") or source.get("deferred") or source.get("stale"))
             ok = True
-            value = _as_float(payload.get("mbps"))
-            if value is not None and value > 0:
-                mbps = value
-                bytes_count = _as_int(payload.get("bytes"))
-                duration_ms = _as_int(payload.get("duration_ms"))
-                cached = bool(payload.get("cached") or payload.get("deferred") or payload.get("stale"))
-            else:
+            if measured_at is None and isinstance(source.get("measured_at"), str):
+                measured_at = source.get("measured_at")
+            return True
+
+        if payload:
+            if payload.get("ok") is True:
+                if _from_success(payload, as_cached=False):
+                    return mbps, bytes_count, duration_ms, cached, ok, measured_at
                 ok = False
-        elif payload.get("ok") is False:
-            ok = False
+            elif payload.get("ok") is False:
+                ok = False
+
+        if last_success and _from_success(last_success, as_cached=True):
+            return mbps, bytes_count, duration_ms, cached, ok, measured_at
         return mbps, bytes_count, duration_ms, cached, ok, measured_at
 
+    last_download = (
+        network.get("speed_test_last_success")
+        if isinstance(network.get("speed_test_last_success"), dict)
+        else None
+    )
+    last_upload = (
+        network.get("speed_test_upload_last_success")
+        if isinstance(network.get("speed_test_upload_last_success"), dict)
+        else None
+    )
+
     download_mbps, download_bytes, download_duration_ms, download_cached, speed_test_ok, measured_at = (
-        _extract_speed(speed)
+        _extract_speed(speed, last_download)
     )
     upload_mbps, upload_bytes, upload_duration_ms, upload_cached, upload_ok, upload_measured_at = (
-        _extract_speed(upload)
+        _extract_speed(upload, last_upload)
     )
     direct_dl_mbps, _, _, direct_dl_cached, _, _ = _extract_speed(direct_download)
     direct_ul_mbps, _, _, direct_ul_cached, _, _ = _extract_speed(direct_upload)

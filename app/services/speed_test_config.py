@@ -255,25 +255,39 @@ def estimate_speed_tests_per_minute(
     settings: MonitoringSettings,
 ) -> float:
     total = 0.0
-    unbounded_due_per_cycle = 0
+    unbounded_polls: list[int] = []
     for component in components:
         if not component.is_active or not component.speed_test_enabled:
             continue
         poll_interval = max(effective_poll_interval_seconds(component, settings), 1)
         speed_interval = effective_speed_test_interval_seconds(component, settings)
         if speed_interval <= 0:
-            unbounded_due_per_cycle += 1
+            unbounded_polls.append(poll_interval)
             continue
         interval = max(poll_interval, speed_interval)
         total += 60.0 / interval
-    if unbounded_due_per_cycle:
-        cycles_per_minute = 60.0 / max(
-            effective_poll_interval_seconds(components[0], settings),
-            SPEED_TEST_MIN_GAP_SECONDS,
-        )
+    if unbounded_polls:
+        # Conservative: fastest unbounded poller dominates the shared live slot.
+        cycles_per_minute = 60.0 / max(min(unbounded_polls), SPEED_TEST_MIN_GAP_SECONDS)
         # Worker allows one live speed test per min gap across all VPN services.
-        total += min(unbounded_due_per_cycle, 1) * cycles_per_minute
+        total += cycles_per_minute
     return total
+
+
+def estimate_speed_test_http_requests_per_minute(
+    components: list[MonitoredComponent],
+    settings: MonitoringSettings,
+) -> float:
+    """Live slots, multiplied by HTTP calls when Cloudflare download+upload runs together."""
+    slots = estimate_speed_tests_per_minute(components, settings)
+    if not components:
+        return slots
+    uses_upload = any(
+        build_speed_test_upload_url(effective_speed_test_url_template(component, settings)) is not None
+        for component in components
+        if component.is_active and component.speed_test_enabled
+    )
+    return slots * (2.0 if uses_upload else 1.0)
 
 
 def speed_test_rate_warning(
@@ -288,14 +302,14 @@ def speed_test_rate_warning(
     if not uses_cloudflare:
         return None
 
-    per_minute = estimate_speed_tests_per_minute(active_vpn, settings)
+    per_minute = estimate_speed_test_http_requests_per_minute(active_vpn, settings)
     if per_minute <= CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE:
         return None
 
     host = CLOUDFLARE_SPEED_TEST_ORIGIN.removeprefix("https://").removeprefix("http://").rstrip("/")
     return (
-        f"{len(active_vpn)} active VPN services may trigger about {per_minute:.1f} speed tests per minute "
-        f"on {host} from this server (Cloudflare has no published limit; HTTP 429 may occur above ~"
+        f"{len(active_vpn)} active VPN services may trigger about {per_minute:.1f} speed-test HTTP requests "
+        f"per minute on {host} from this server (Cloudflare has no published limit; HTTP 429 may occur above ~"
         f"{CLOUDFLARE_SPEED_TEST_GUIDANCE_REQUESTS_PER_MINUTE}/min). "
         "The worker enforces at least "
         f"{CLOUDFLARE_SPEED_TEST_MIN_GAP_SECONDS}s between live speed tests and staggers which VPN runs next. "

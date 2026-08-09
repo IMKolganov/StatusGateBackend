@@ -572,6 +572,7 @@ class TestSpeedTestConfig:
         warning = speed_test_rate_warning(components, settings)
         assert warning is not None
         assert "speed.cloudflare.com" in warning
+        assert "HTTP requests" in warning
         assert str(len(components)) in warning
 
     def test_speed_test_context_default(self) -> None:
