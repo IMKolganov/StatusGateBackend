@@ -23,6 +23,7 @@ from typing import Any, Iterator
 from app.config import settings
 from app.core.speed_test_defaults import DEFAULT_SPEED_TEST_INTERVAL_SECONDS, default_speed_test_url_template
 from app.models.monitoring_settings import MonitoringSettings
+from app.schemas.monitored_component import DEFAULT_SPEED_TEST_BYTES
 from app.services.speed_test_config import (
     build_speed_test_upload_url,
     build_speed_test_url,
@@ -46,10 +47,6 @@ _HISTORY_LIMIT = 128
 _pending_skip_reason: str | None = None
 _disk_hydrated = False
 _disk_mtime_ns: int | None = None
-
-# Default transfer size for host WAN (same as VPN default unless overridden later).
-_DEFAULT_WAN_BYTES = 524_288
-
 
 @dataclass(frozen=True)
 class HostWanBaseline:
@@ -285,7 +282,7 @@ def run_host_wan_speed_if_due(
     settings_row: MonitoringSettings,
     *,
     now: datetime | None = None,
-    bytes_count: int = _DEFAULT_WAN_BYTES,
+    bytes_count: int = DEFAULT_SPEED_TEST_BYTES,
 ) -> HostWanBaseline | None:
     """Measure host WAN down+up when due and no ephemeral OpenVPN is active."""
     global _pending_skip_reason

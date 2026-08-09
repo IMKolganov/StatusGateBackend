@@ -205,7 +205,7 @@ def _run_openvpn_check(component: MonitoredComponent, *, speed_test_context: Spe
                         gateway=network.get("gateway"),
                         proxy_url=None,
                         iface=iface,
-                        timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+                        timeout=min(30, max(15, timeout - connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
                         speed_test_bytes=speed_test_bytes,
                         speed_test_context=speed_test_context,
                     )
@@ -326,7 +326,7 @@ def _run_xray_check(component: MonitoredComponent, *, speed_test_context: SpeedT
                     gateway=None,
                     proxy_url=proxy_url,
                     iface=None,
-                    timeout=min(12, max(5, timeout - connect_time_ms / 1000 - (probe_result.get("latency_ms") or 0) / 1000)),
+                    timeout=min(30, max(15, timeout - connect_time_ms / 1000 - (probe_result.get("latency_ms") or 0) / 1000)),
                     speed_test_bytes=speed_test_bytes,
                     speed_test_context=speed_test_context,
                 )

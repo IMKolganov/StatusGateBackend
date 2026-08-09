@@ -239,7 +239,7 @@ def run_openvpn_persistent_probe(
             gateway=network.get("gateway"),
             proxy_url=None,
             iface=handle.iface,
-            timeout=min(12, max(5, timeout - handle.connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
+            timeout=min(30, max(15, timeout - handle.connect_time_ms / 1000 - (probe.get("latency_ms") or 0) / 1000)),
             speed_test_bytes=speed_test_bytes,
             speed_test_context=speed_test_context,
             netns=handle.netns,

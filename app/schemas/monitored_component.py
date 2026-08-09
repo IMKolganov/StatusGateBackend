@@ -8,7 +8,8 @@ from app.models.enums import VPN_CHECK_TYPES, ConnectionMode
 from app.schemas.network import NetworkSummary, VpnCheckConfig
 from app.services.speed_test_config import validate_speed_test_url_template
 
-DEFAULT_SPEED_TEST_BYTES = 524_288
+# 5 MiB: small probes (512 KiB) never leave TCP slow-start and under-report Mbps.
+DEFAULT_SPEED_TEST_BYTES = 5_242_880
 MIN_SPEED_TEST_BYTES = 1_024
 MAX_SPEED_TEST_BYTES = 52_428_800
 MIN_SPEED_TEST_INTERVAL_SECONDS = 0
