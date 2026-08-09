@@ -391,8 +391,19 @@ def test_tunnel_metrics_hours_bounds_and_no_leak(
         "download_bytes",
         "download_duration_ms",
         "download_cached",
+        "upload_mbps",
+        "upload_bytes",
+        "upload_duration_ms",
+        "upload_cached",
+        "direct_download_mbps",
+        "direct_download_cached",
+        "direct_upload_mbps",
+        "direct_upload_cached",
         "speed_test_ok",
         "speed_test_measured_at",
+        "upload_speed_test_ok",
+        "upload_speed_test_measured_at",
+        "direct_speed_test_measured_at",
     }
     assert "latest" in body
     latest = body["latest"]

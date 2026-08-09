@@ -60,7 +60,9 @@ python -m app.worker
 ## Tests
 
 ```bash
+# Needs Postgres (e.g. docker compose up -d db from the monorepo root).
 pytest -v
+pytest -q --cov=app --cov-report=term-missing
 ```
 
 Requires PostgreSQL with database `statusgate_test` (see `tests/conftest.py`).
