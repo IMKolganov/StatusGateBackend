@@ -14,7 +14,7 @@ from app.middleware.https import RequireHttpsMiddleware
 from app.middleware.trace_id import TraceIdMiddleware
 from app.schemas.health import HealthStatusResponse
 
-app = FastAPI(title="StatusGate API", version="0.2.0")
+app = FastAPI(title="StatusGate API", version="0.3.0")
 setup_openapi(app)
 
 app.state.limiter = limiter
