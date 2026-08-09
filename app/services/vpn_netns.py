@@ -61,7 +61,9 @@ def ensure_netns_resolv(name: str) -> None:
         resolv_dir.mkdir(parents=True, exist_ok=True)
         resolv_path = resolv_dir / "resolv.conf"
         if not resolv_path.exists():
-            resolv_path.write_text("nameserver 1.1.1.1\nnameserver 8.8.8.8\n", encoding="utf-8")
+            from app.core.probe_defaults import vpn_netns_nameserver_lines
+
+            resolv_path.write_text(vpn_netns_nameserver_lines(), encoding="utf-8")
     except OSError:
         # Non-fatal in restricted environments / unit tests.
         return

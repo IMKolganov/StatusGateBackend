@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.models.incident import Incident
 from app.models.incident_update import IncidentUpdate
+from app.models.monitored_component import MonitoredComponent
 from app.models.project import Project
 from app.schemas.incident import (
     IncidentCreate,
@@ -42,18 +43,35 @@ class IncidentService:
     def _get_incident(self, incident_id: UUID) -> Incident:
         incident = self._session.scalar(
             select(Incident)
-            .options(selectinload(Incident.updates))
+            .options(
+                selectinload(Incident.updates),
+                selectinload(Incident.monitored_component),
+            )
             .where(Incident.id == incident_id)
         )
         if incident is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
         return incident
 
+    def _resolve_component(self, project_id: UUID, component_id: UUID | None) -> MonitoredComponent | None:
+        if component_id is None:
+            return None
+        component = self._session.get(MonitoredComponent, component_id)
+        if component is None or component.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Service not found in this project",
+            )
+        return component
+
     def list_for_project(self, project_id: UUID) -> list[IncidentResponse]:
         self._get_project(project_id)
         incidents = self._session.scalars(
             select(Incident)
-            .options(selectinload(Incident.updates))
+            .options(
+                selectinload(Incident.updates),
+                selectinload(Incident.monitored_component),
+            )
             .where(Incident.project_id == project_id)
             .order_by(Incident.created_at.desc())
         ).all()
@@ -61,20 +79,50 @@ class IncidentService:
 
     def create(self, project_id: UUID, payload: IncidentCreate) -> IncidentResponse:
         self._get_project(project_id)
+        self._resolve_component(project_id, payload.monitored_component_id)
         posted_at = payload.posted_at or datetime.now(UTC)
-        incident = Incident(project_id=project_id, title=payload.title)
+        starts_at = payload.starts_at or posted_at
+        ends_at = payload.ends_at
+        if ends_at is not None and ends_at < starts_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ends_at must be greater than or equal to starts_at",
+            )
+        incident = Incident(
+            project_id=project_id,
+            title=payload.title,
+            monitored_component_id=payload.monitored_component_id,
+            starts_at=starts_at,
+            ends_at=ends_at,
+        )
         incident.updates.append(
             IncidentUpdate(message=payload.message, status=payload.status, posted_at=posted_at)
         )
         self._session.add(incident)
         self._session.commit()
-        self._session.refresh(incident)
         return self._to_incident_response(self._get_incident(incident.id))
 
     def update_incident(self, incident_id: UUID, payload: IncidentUpdatePayload) -> IncidentResponse:
         incident = self._get_incident(incident_id)
         if payload.title is not None:
             incident.title = payload.title
+        if payload.clear_monitored_component:
+            incident.monitored_component_id = None
+        elif payload.monitored_component_id is not None:
+            self._resolve_component(incident.project_id, payload.monitored_component_id)
+            incident.monitored_component_id = payload.monitored_component_id
+        if payload.starts_at is not None:
+            incident.starts_at = payload.starts_at
+        if payload.clear_ends_at:
+            incident.ends_at = None
+        elif payload.ends_at is not None:
+            incident.ends_at = payload.ends_at
+        effective_end = incident.ends_at
+        if effective_end is not None and effective_end < incident.starts_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ends_at must be greater than or equal to starts_at",
+            )
         self._session.commit()
         return self._to_incident_response(self._get_incident(incident_id))
 
@@ -117,9 +165,12 @@ class IncidentService:
 
     def get_public_history(self, slug: str, *, limit: int = 200) -> PublicProjectHistory:
         project = self._get_project_by_slug(slug)
-        rows = self._session.execute(
-            select(IncidentUpdate, Incident)
+        updates = self._session.scalars(
+            select(IncidentUpdate)
             .join(Incident, IncidentUpdate.incident_id == Incident.id)
+            .options(
+                selectinload(IncidentUpdate.incident).selectinload(Incident.monitored_component),
+            )
             .where(Incident.project_id == project.id)
             .order_by(IncidentUpdate.posted_at.desc())
             .limit(limit)
@@ -128,12 +179,14 @@ class IncidentService:
         days_map: dict[date, list[PublicHistoryEntry]] = {}
         day_order: list[date] = []
 
-        for update, incident in rows:
+        for update in updates:
+            incident = update.incident
             local_dt = self._as_local(update.posted_at)
             day_key = local_dt.date()
             if day_key not in days_map:
                 days_map[day_key] = []
                 day_order.append(day_key)
+            component = incident.monitored_component
             days_map[day_key].append(
                 PublicHistoryEntry(
                     incident_id=incident.id,
@@ -142,6 +195,10 @@ class IncidentService:
                     message=update.message,
                     status=update.status,
                     posted_at=update.posted_at,
+                    starts_at=incident.starts_at,
+                    ends_at=incident.ends_at,
+                    service_name=component.name if component is not None else None,
+                    service_slug=component.slug if component is not None else None,
                 )
             )
 
@@ -171,10 +228,16 @@ class IncidentService:
     @staticmethod
     def _to_incident_response(incident: Incident) -> IncidentResponse:
         sorted_updates = sorted(incident.updates, key=lambda item: item.posted_at, reverse=True)
+        component = incident.monitored_component
         return IncidentResponse(
             id=incident.id,
             project_id=incident.project_id,
             title=incident.title,
+            monitored_component_id=incident.monitored_component_id,
+            service_name=component.name if component is not None else None,
+            service_slug=component.slug if component is not None else None,
+            starts_at=incident.starts_at,
+            ends_at=incident.ends_at,
             created_at=incident.created_at,
             updated_at=incident.updated_at,
             updates=[IncidentUpdateResponse.model_validate(item) for item in sorted_updates],

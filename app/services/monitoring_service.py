@@ -1,8 +1,10 @@
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import cast as sa_cast, delete, func, or_, select, true
+from sqlalchemy.dialects.postgresql import ARRAY, UUID as PG_UUID
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.orm import Session
 
@@ -13,14 +15,56 @@ from app.models.monitored_component import MonitoredComponent
 from app.models.monitoring_settings import MONITORING_SETTINGS_ID, MonitoringSettings
 from app.models.project import Project
 from app.services.health_check_service import run_health_check
+from app.services.host_wan_speed import run_host_wan_speed_if_due
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
+    extract_last_live_speed_test_from_details,
+    extract_last_live_speed_test_upload_from_details,
     extract_last_successful_speed_test,
-    extract_speed_test_from_details,
     pick_staggered_speed_test_component_ids,
+    resolve_speed_test_memory,
+    resolve_speed_test_upload_memory,
     should_run_speed_test,
 )
+
+
+def fetch_latest_check_results(
+    session: Session,
+    component_ids: Sequence[UUID],
+    *,
+    before: datetime | None = None,
+) -> list[CheckResult]:
+    """Latest check per component via LATERAL … LIMIT 1 (index-friendly).
+
+    DISTINCT ON / GROUP BY max(checked_at) scan every matching row; this walks the
+    (monitored_component_id, checked_at) index backward once per id.
+    """
+    if not component_ids:
+        return []
+
+    ids = select(
+        func.unnest(sa_cast(list(component_ids), ARRAY(PG_UUID(as_uuid=True)))).label("component_id")
+    ).subquery("component_ids")
+    filters = [CheckResult.monitored_component_id == ids.c.component_id]
+    if before is not None:
+        filters.append(CheckResult.checked_at < before)
+
+    latest = (
+        select(CheckResult.id)
+        .where(*filters)
+        .order_by(CheckResult.checked_at.desc())
+        .limit(1)
+        .correlate(ids)
+        .lateral()
+        .alias("latest_check")
+    )
+    latest_ids = list(
+        session.scalars(select(latest.c.id).select_from(ids.join(latest, true()))).all()
+    )
+    if not latest_ids:
+        return []
+    return list(session.scalars(select(CheckResult).where(CheckResult.id.in_(latest_ids))).all())
 
 
 class MonitoringSettingsRepository:
@@ -70,24 +114,34 @@ class CheckResultRepository:
         return list(self._session.scalars(stmt).all()), total
 
     def latest_by_component_ids(self, component_ids: list[UUID]) -> dict[UUID, CheckResult]:
-        if not component_ids:
-            return {}
-        subq = (
-            select(
-                CheckResult.monitored_component_id,
-                func.max(CheckResult.checked_at).label("max_checked_at"),
-            )
-            .where(CheckResult.monitored_component_id.in_(component_ids))
-            .group_by(CheckResult.monitored_component_id)
-            .subquery()
-        )
-        stmt = select(CheckResult).join(
-            subq,
-            (CheckResult.monitored_component_id == subq.c.monitored_component_id)
-            & (CheckResult.checked_at == subq.c.max_checked_at),
-        )
-        results = self._session.scalars(stmt).all()
+        results = fetch_latest_check_results(self._session, component_ids)
         return {result.monitored_component_id: result for result in results}
+
+    def latest_with_meaningful_speed_test(
+        self,
+        component_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> CheckResult | None:
+        """Most recent check that still carries a usable speed-test success (skips empty downs)."""
+        stmt = (
+            select(CheckResult)
+            .where(CheckResult.monitored_component_id == component_id)
+            .where(CheckResult.details.is_not(None))
+            .where(
+                or_(
+                    CheckResult.details.contains({"network": {"speed_test_last_success": {"ok": True}}}),
+                    CheckResult.details.contains({"network": {"speed_test": {"ok": True}}}),
+                )
+            )
+            .order_by(CheckResult.checked_at.desc())
+            .limit(limit)
+        )
+        for row in self._session.scalars(stmt).all():
+            details = row.details if isinstance(row.details, dict) else None
+            if extract_last_successful_speed_test(details, checked_at=row.checked_at):
+                return row
+        return None
 
     def count_for_component(self, component_id: UUID) -> int:
         stmt = select(func.count()).select_from(CheckResult).where(
@@ -202,10 +256,31 @@ class HealthCheckRunner:
             latest = latest_map.get(component.id)
             latest_details = latest.details if latest and isinstance(latest.details, dict) else None
             checked_at = latest.checked_at if latest else None
-            previous_speed_test = extract_speed_test_from_details(latest_details, checked_at=checked_at)
-            last_successful_speed_test = extract_last_successful_speed_test(
+            history = None
+            if extract_last_successful_speed_test(latest_details, checked_at=checked_at) is None:
+                history = self._results_repo.latest_with_meaningful_speed_test(component.id)
+            history_details = history.details if history and isinstance(history.details, dict) else None
+            previous_speed_test, last_successful_speed_test, previous_speed_test_stats = resolve_speed_test_memory(
                 latest_details,
-                checked_at=checked_at,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
+            )
+            (
+                previous_speed_test_upload,
+                last_successful_speed_test_upload,
+                previous_speed_test_upload_stats,
+            ) = resolve_speed_test_upload_memory(
+                latest_details,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
+            )
+            last_live_speed_test = extract_last_live_speed_test_from_details(
+                latest_details, checked_at=checked_at
+            )
+            last_live_speed_test_upload = extract_last_live_speed_test_upload_from_details(
+                latest_details, checked_at=checked_at
             )
             due = should_run_speed_test(component, settings, latest)
             if speed_test_allowed_ids is None:
@@ -217,6 +292,12 @@ class HealthCheckRunner:
                 run_speed_test=run_speed,
                 previous_speed_test=previous_speed_test,
                 last_successful_speed_test=last_successful_speed_test,
+                previous_speed_test_stats=previous_speed_test_stats,
+                last_live_speed_test=last_live_speed_test,
+                previous_speed_test_upload=previous_speed_test_upload,
+                last_successful_speed_test_upload=last_successful_speed_test_upload,
+                previous_speed_test_upload_stats=previous_speed_test_upload_stats,
+                last_live_speed_test_upload=last_live_speed_test_upload,
             )
         result = run_health_check(component, speed_test_context=speed_test_context)
         component.last_checked_at = result.checked_at
@@ -228,6 +309,9 @@ class HealthCheckRunner:
         due = self.list_due_components()
         due.sort(key=lambda component: (component.check_type not in VPN_CHECK_TYPES, str(component.id)))
         settings = self.get_settings()
+        # Host WAN baseline shares the global speed-test slot with VPN tests; run first so
+        # ephemeral OpenVPN checks in this cycle do not block a due WAN measurement.
+        run_host_wan_speed_if_due(settings)
         vpn_due = [component for component in due if component.check_type in VPN_CHECK_TYPES]
         latest_map = self._results_repo.latest_by_component_ids([component.id for component in vpn_due])
         allowed_speed_ids = pick_staggered_speed_test_component_ids(vpn_due, settings, latest_map)

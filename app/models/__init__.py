@@ -13,6 +13,7 @@ from app.models.monitoring_settings import MonitoringSettings
 from app.models.project import Project
 from app.models.refresh_token import RefreshToken
 from app.models.subscription import Subscription
+from app.models.tunnel_ping_sample import TunnelPingSample
 
 __all__ = [
     "AccessRole",
@@ -29,5 +30,6 @@ __all__ = [
     "Project",
     "RefreshToken",
     "Subscription",
+    "TunnelPingSample",
     "account_roles_table",
 ]

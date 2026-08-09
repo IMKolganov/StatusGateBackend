@@ -44,6 +44,15 @@ services:
       SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-30}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      DEFAULT_SPEED_TEST_URL_TEMPLATE: ${DEFAULT_SPEED_TEST_URL_TEMPLATE:-https://speed.cloudflare.com/__down?bytes={bytes}}
+      CLOUDFLARE_SPEED_TEST_ORIGIN: ${CLOUDFLARE_SPEED_TEST_ORIGIN:-https://speed.cloudflare.com}
+      DEFAULT_PROBE_URL: ${DEFAULT_PROBE_URL:-https://ifconfig.me/ip}
+      GOOGLE_PROBE_URL: ${GOOGLE_PROBE_URL:-https://www.gstatic.com/generate_204}
+      INTERNET_PING_HOST: ${INTERNET_PING_HOST:-8.8.8.8}
+      VPN_NETNS_DNS_SERVERS: ${VPN_NETNS_DNS_SERVERS:-1.1.1.1,8.8.8.8}
+      HOST_WAN_BASELINE_PATH: ${HOST_WAN_BASELINE_PATH:-/var/lib/statusgate/host_wan_baseline.json}
+    volumes:
+      - statusgate_data:/var/lib/statusgate
     depends_on:
       db:
         condition: service_healthy
@@ -68,6 +77,15 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       DEFAULT_POLL_INTERVAL_SECONDS: ${DEFAULT_POLL_INTERVAL_SECONDS:-60}
       SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-30}
+      DEFAULT_SPEED_TEST_URL_TEMPLATE: ${DEFAULT_SPEED_TEST_URL_TEMPLATE:-https://speed.cloudflare.com/__down?bytes={bytes}}
+      CLOUDFLARE_SPEED_TEST_ORIGIN: ${CLOUDFLARE_SPEED_TEST_ORIGIN:-https://speed.cloudflare.com}
+      DEFAULT_PROBE_URL: ${DEFAULT_PROBE_URL:-https://ifconfig.me/ip}
+      GOOGLE_PROBE_URL: ${GOOGLE_PROBE_URL:-https://www.gstatic.com/generate_204}
+      INTERNET_PING_HOST: ${INTERNET_PING_HOST:-8.8.8.8}
+      VPN_NETNS_DNS_SERVERS: ${VPN_NETNS_DNS_SERVERS:-1.1.1.1,8.8.8.8}
+      HOST_WAN_BASELINE_PATH: ${HOST_WAN_BASELINE_PATH:-/var/lib/statusgate/host_wan_baseline.json}
+    volumes:
+      - statusgate_data:/var/lib/statusgate
     depends_on:
       db:
         condition: service_healthy
@@ -76,3 +94,4 @@ services:
 
 volumes:
   pgdata:
+  statusgate_data:

@@ -13,12 +13,35 @@ DEGRADED_OUTCOMES = {CheckOutcome.DEGRADED.value}
 
 @dataclass(frozen=True)
 class DayCheckStats:
-    outcomes: list[str]
-    downtime_seconds: int
+    downtime_seconds: int = 0
+    total: int = 0
+    up: int = 0
+    degraded: int = 0
+    failed: int = 0
+
+    @classmethod
+    def from_outcomes(cls, outcomes: list[str], *, downtime_seconds: int = 0) -> "DayCheckStats":
+        total, up, degraded, failed = day_check_counts(outcomes)
+        return cls(
+            downtime_seconds=downtime_seconds,
+            total=total,
+            up=up,
+            degraded=degraded,
+            failed=failed,
+        )
+
+    def with_downtime(self, downtime_seconds: int) -> "DayCheckStats":
+        return DayCheckStats(
+            downtime_seconds=downtime_seconds,
+            total=self.total,
+            up=self.up,
+            degraded=self.degraded,
+            failed=self.failed,
+        )
 
 
 def empty_day_stats() -> DayCheckStats:
-    return DayCheckStats(outcomes=[], downtime_seconds=0)
+    return DayCheckStats()
 
 
 def is_outage_outcome(outcome: str) -> bool:
@@ -69,25 +92,40 @@ def day_check_counts(outcomes: list[str]) -> tuple[int, int, int, int]:
     return total, up, degraded, failed
 
 
+def availability_from_counts(total: int, up: int, degraded: int) -> float | None:
+    if total <= 0:
+        return None
+    return round((up + degraded) / total * 100, 2)
+
+
 def availability_percent(outcomes: list[str]) -> float | None:
     if not outcomes:
         return None
     total, up, degraded, _failed = day_check_counts(outcomes)
-    return round((up + degraded) / total * 100, 2)
+    return availability_from_counts(total, up, degraded)
+
+
+def availability_from_stats(stats: DayCheckStats) -> float | None:
+    return availability_from_counts(stats.total, stats.up, stats.degraded)
 
 
 DAY_OPERATIONAL_MIN_AVAILABILITY = 99.0
 DAY_DEGRADED_MIN_AVAILABILITY = 90.0
 
 
-def status_from_outcomes(outcomes: list[str]) -> str:
-    if not outcomes:
+def status_from_availability(availability: float | None) -> str:
+    if availability is None:
         return "no_data"
-
-    availability = availability_percent(outcomes)
-    assert availability is not None
     if availability >= DAY_OPERATIONAL_MIN_AVAILABILITY:
         return "operational"
     if availability >= DAY_DEGRADED_MIN_AVAILABILITY:
         return "degraded"
     return "outage"
+
+
+def status_from_outcomes(outcomes: list[str]) -> str:
+    return status_from_availability(availability_percent(outcomes))
+
+
+def status_from_stats(stats: DayCheckStats) -> str:
+    return status_from_availability(availability_from_stats(stats))

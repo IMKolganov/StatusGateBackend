@@ -27,16 +27,21 @@ from app.services.monitoring_service import CheckResultRepository, HealthCheckRu
 from app.services.speed_test_config import (
     SpeedTestRunContext,
     effective_speed_test_url_template,
+    extract_last_live_speed_test_from_details,
+    extract_last_live_speed_test_upload_from_details,
     extract_last_successful_speed_test,
-    extract_speed_test_from_details,
     pick_staggered_speed_test_component_ids,
+    resolve_speed_test_memory,
+    resolve_speed_test_upload_memory,
     should_run_speed_test,
 )
+from app.services.tunnel_ping_sampler import TunnelPingSampler
 from app.services.vpn_check_service import (
     RECONNECT_DELAY_SECONDS,
     OpenVpnSessionHandle,
     OpenVpnStartResult,
     is_openvpn_persistent_session_up,
+    resolve_persistent_gateway,
     run_openvpn_persistent_probe,
     start_openvpn_persistent_session,
     stop_openvpn_persistent_session,
@@ -78,7 +83,15 @@ class _PersistentOpenVpnWorker(threading.Thread):
     def run(self) -> None:
         handle: OpenVpnSessionHandle | None = None
         component: MonitoredComponent | None = None
+        sampler: TunnelPingSampler | None = None
         connect_failures = 0
+
+        def stop_sampler() -> None:
+            nonlocal sampler
+            if sampler is not None:
+                sampler.stop()
+                sampler = None
+
         try:
             while not self._stop.is_set():
                 component = self._load_component()
@@ -87,6 +100,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
 
                 try:
                     if handle is None or not is_openvpn_persistent_session_up(handle):
+                        stop_sampler()
                         if handle is not None:
                             self._save_session_event(component, handle, ConnectionEventType.TUNNEL_DOWN.value)
                             stop_openvpn_persistent_session(handle)
@@ -110,6 +124,20 @@ class _PersistentOpenVpnWorker(threading.Thread):
 
                         connect_failures = 0
                         self._save_session_event(component, handle, ConnectionEventType.TUNNEL_UP.value)
+                        # Auxiliary diagnostics — must never take the session loop down.
+                        try:
+                            sampler = TunnelPingSampler(
+                                component.id,
+                                netns=handle.netns,
+                                gateway=resolve_persistent_gateway(handle),
+                            )
+                            sampler.start()
+                        except Exception:
+                            sampler = None
+                            logger.exception(
+                                "Failed to start continuous tunnel ping for component %s",
+                                self._component_id,
+                            )
 
                     speed_test_context = self._build_speed_test_context(component)
                     result = run_openvpn_persistent_probe(
@@ -133,6 +161,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                         _NETNS_PERMISSION_BACKOFF_SECONDS,
                         exc_info=True,
                     )
+                    stop_sampler()
                     if handle is not None:
                         stop_openvpn_persistent_session(handle)
                         handle = None
@@ -151,6 +180,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                         exc,
                         backoff,
                     )
+                    stop_sampler()
                     if handle is not None:
                         stop_openvpn_persistent_session(handle)
                         handle = None
@@ -163,6 +193,7 @@ class _PersistentOpenVpnWorker(threading.Thread):
                     if self._stop.wait(backoff):
                         break
         finally:
+            stop_sampler()
             if handle is not None:
                 stop_openvpn_persistent_session(handle)
                 if component is None:
@@ -208,22 +239,52 @@ class _PersistentOpenVpnWorker(threading.Thread):
                     )
                 ).all()
             )
-            latest_map = CheckResultRepository(session).latest_by_component_ids(
+            results_repo = CheckResultRepository(session)
+            latest_map = results_repo.latest_by_component_ids(
                 [row.id for row in vpn_components] or [component.id]
             )
             latest = latest_map.get(component.id)
             latest_details = latest.details if latest and isinstance(latest.details, dict) else None
             checked_at = latest.checked_at if latest else None
+            history = None
+            if extract_last_successful_speed_test(latest_details, checked_at=checked_at) is None:
+                history = results_repo.latest_with_meaningful_speed_test(component.id)
+            history_details = history.details if history and isinstance(history.details, dict) else None
+            previous_speed_test, last_successful_speed_test, previous_speed_test_stats = resolve_speed_test_memory(
+                latest_details,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
+            )
+            (
+                previous_speed_test_upload,
+                last_successful_speed_test_upload,
+                previous_speed_test_upload_stats,
+            ) = resolve_speed_test_upload_memory(
+                latest_details,
+                latest_checked_at=checked_at,
+                history_details=history_details,
+                history_checked_at=history.checked_at if history else None,
+            )
+            last_live_speed_test = extract_last_live_speed_test_from_details(
+                latest_details, checked_at=checked_at
+            )
+            last_live_speed_test_upload = extract_last_live_speed_test_upload_from_details(
+                latest_details, checked_at=checked_at
+            )
             allowed_ids = pick_staggered_speed_test_component_ids(vpn_components, settings, latest_map)
             due = should_run_speed_test(component, settings, latest)
             return SpeedTestRunContext(
                 url_template=effective_speed_test_url_template(component, settings),
                 run_speed_test=due and component.id in allowed_ids,
-                previous_speed_test=extract_speed_test_from_details(latest_details, checked_at=checked_at),
-                last_successful_speed_test=extract_last_successful_speed_test(
-                    latest_details,
-                    checked_at=checked_at,
-                ),
+                previous_speed_test=previous_speed_test,
+                last_successful_speed_test=last_successful_speed_test,
+                previous_speed_test_stats=previous_speed_test_stats,
+                last_live_speed_test=last_live_speed_test,
+                previous_speed_test_upload=previous_speed_test_upload,
+                last_successful_speed_test_upload=last_successful_speed_test_upload,
+                previous_speed_test_upload_stats=previous_speed_test_upload_stats,
+                last_live_speed_test_upload=last_live_speed_test_upload,
             )
 
     def _persist_result(self, component: MonitoredComponent, result: CheckResult) -> None:
@@ -391,6 +452,8 @@ class _PersistentOpenVpnWorker(threading.Thread):
             run_speed_test=False,
             previous_speed_test=built.previous_speed_test,
             last_successful_speed_test=built.last_successful_speed_test,
+            previous_speed_test_stats=built.previous_speed_test_stats,
+            last_live_speed_test=built.last_live_speed_test,
         )
         result = run_openvpn_persistent_probe(
             component,

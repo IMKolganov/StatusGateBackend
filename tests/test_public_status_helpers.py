@@ -3,11 +3,12 @@ from uuid import uuid4
 
 from app.models.enums import CheckOutcome
 from app.services.public_status_service import (
+    _add_stats,
     _build_day_bar,
-    _collect_outcomes,
     _max_downtime_for_day,
     _merge_status,
     _outcome_at_end_of_previous_day,
+    _sum_stats,
 )
 from app.services.uptime_stats import (
     DayCheckStats,
@@ -16,13 +17,14 @@ from app.services.uptime_stats import (
     empty_day_stats,
     is_outage_outcome,
     status_from_outcomes,
+    status_from_stats,
 )
 
 
 class TestUptimeStatsHelpers:
     def test_empty_day_stats(self) -> None:
         stats = empty_day_stats()
-        assert stats.outcomes == []
+        assert stats.total == 0
         assert stats.downtime_seconds == 0
 
     def test_is_outage_outcome(self) -> None:
@@ -94,26 +96,31 @@ class TestPublicStatusHelpers:
         )
         assert outcome is None
 
-    def test_collect_outcomes_skips_missing_days(self) -> None:
+    def test_sum_stats_skips_missing_days(self) -> None:
         component_id = uuid4()
         day = date(2026, 6, 20)
         stats = {
-            (component_id, day): DayCheckStats(
-                outcomes=[CheckOutcome.UP.value, CheckOutcome.DEGRADED.value],
-                downtime_seconds=0,
+            (component_id, day): DayCheckStats.from_outcomes(
+                [CheckOutcome.UP.value, CheckOutcome.DEGRADED.value],
             ),
         }
 
-        outcomes = _collect_outcomes([component_id], [day, date(2026, 6, 21)], stats)
-        assert outcomes == [CheckOutcome.UP.value, CheckOutcome.DEGRADED.value]
+        summed = _sum_stats([component_id], [day, date(2026, 6, 21)], stats)
+        assert summed.total == 2
+        assert summed.up == 1
+        assert summed.degraded == 1
 
     def test_max_downtime_for_day(self) -> None:
         first = uuid4()
         second = uuid4()
         day = date(2026, 6, 20)
         stats = {
-            (first, day): DayCheckStats(outcomes=[CheckOutcome.UP.value], downtime_seconds=600),
-            (second, day): DayCheckStats(outcomes=[CheckOutcome.UP.value], downtime_seconds=1800),
+            (first, day): DayCheckStats.from_outcomes(
+                [CheckOutcome.UP.value], downtime_seconds=600
+            ),
+            (second, day): DayCheckStats.from_outcomes(
+                [CheckOutcome.UP.value], downtime_seconds=1800
+            ),
         }
 
         assert _max_downtime_for_day([first, second], day, stats) == 1800
@@ -126,13 +133,15 @@ class TestPublicStatusHelpers:
 
     def test_build_day_bar_includes_downtime_and_counts(self) -> None:
         day = date(2026, 6, 20)
-        outcomes = [CheckOutcome.UP.value, CheckOutcome.DEGRADED.value]
+        stats = DayCheckStats.from_outcomes(
+            [CheckOutcome.UP.value, CheckOutcome.DEGRADED.value],
+            downtime_seconds=900,
+        )
 
         bar = _build_day_bar(
             day=day,
             day_status="operational",
-            outcomes=outcomes,
-            downtime_seconds=900,
+            stats=stats,
             incidents=[],
         )
 
@@ -147,10 +156,15 @@ class TestPublicStatusHelpers:
         bar = _build_day_bar(
             day=date(2026, 6, 20),
             day_status="no_data",
-            outcomes=[],
+            stats=empty_day_stats(),
             incidents=[],
         )
 
         assert bar.downtime_seconds == 0
         assert bar.check_count == 0
         assert bar.tooltip == "No checks"
+
+    def test_status_from_stats_matches_outcomes(self) -> None:
+        stats = DayCheckStats.from_outcomes([CheckOutcome.UP.value] * 99 + [CheckOutcome.DOWN.value])
+        assert status_from_stats(stats) == "operational"
+        assert _add_stats(stats, empty_day_stats()).total == 100
