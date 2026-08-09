@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     google_probe_url: str = "https://www.gstatic.com/generate_204"
     internet_ping_host: str = "8.8.8.8"
     vpn_netns_dns_servers: str = "1.1.1.1,8.8.8.8"
+    # Shared by API + worker so manual checks can stamp the latest WAN baseline.
+    host_wan_baseline_path: str = "/var/lib/statusgate/host_wan_baseline.json"
 
     google_client_id: str = ""
     google_client_secret: str = ""

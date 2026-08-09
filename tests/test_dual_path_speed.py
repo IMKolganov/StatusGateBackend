@@ -1,5 +1,6 @@
 """Dual-path speed metrics: VPN upload URL, enrich, and host WAN baseline."""
 
+import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -313,6 +314,115 @@ def test_public_network_summary_includes_upload_fields() -> None:
 def test_get_latest_after_reset_is_none() -> None:
     reset_host_wan_state_for_tests()
     assert get_latest_host_wan_baseline() is None
+
+
+def test_host_wan_baseline_survives_memory_clear(tmp_path, monkeypatch) -> None:
+    """API and worker are separate processes; disk must bridge the baseline."""
+    path = tmp_path / "host_wan_baseline.json"
+    monkeypatch.setattr(host_wan_speed.settings, "host_wan_baseline_path", str(path))
+    reset_host_wan_state_for_tests()
+    reset_cloudflare_speed_test_slot_for_tests()
+
+    measured = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    host_wan_speed._store_baseline(
+        HostWanBaseline(
+            measured_at=measured,
+            download={"ok": True, "mbps": 180.0, "bytes": 1000, "duration_ms": 40, "measured_at": measured.isoformat()},
+            upload={"ok": True, "mbps": 35.0, "bytes": 1000, "duration_ms": 200, "measured_at": measured.isoformat()},
+        )
+    )
+    assert path.is_file()
+
+    # Simulate a fresh API process: empty memory, same shared file.
+    with host_wan_speed._store_lock:
+        host_wan_speed._latest = None
+        host_wan_speed._history = []
+        host_wan_speed._pending_skip_reason = None
+        host_wan_speed._disk_hydrated = False
+        host_wan_speed._disk_mtime_ns = None
+
+    assert get_latest_host_wan_baseline() is not None
+    network: dict = {}
+    attach_host_wan_baseline_to_network(network)
+    assert network["direct_speed_test"]["mbps"] == 180.0
+    assert network["direct_speed_test_upload"]["mbps"] == 35.0
+
+
+def test_host_wan_baseline_reloads_when_file_mtime_changes(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "host_wan_baseline.json"
+    monkeypatch.setattr(host_wan_speed.settings, "host_wan_baseline_path", str(path))
+    reset_host_wan_state_for_tests()
+
+    first = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    host_wan_speed._store_baseline(
+        HostWanBaseline(
+            measured_at=first,
+            download={"ok": True, "mbps": 100.0, "bytes": 1000, "duration_ms": 50, "measured_at": first.isoformat()},
+            upload=None,
+        )
+    )
+    assert get_latest_host_wan_baseline() is not None
+    assert get_latest_host_wan_baseline().download["mbps"] == 100.0
+
+    # Another process writes a newer baseline to the shared file.
+    second = datetime(2026, 8, 9, 13, 0, tzinfo=UTC)
+    newer = {
+        "latest": {
+            "measured_at": second.isoformat(),
+            "download": {
+                "ok": True,
+                "mbps": 250.0,
+                "bytes": 1000,
+                "duration_ms": 30,
+                "measured_at": second.isoformat(),
+            },
+            "upload": None,
+            "skipped": False,
+            "skip_reason": None,
+        },
+        "history": [],
+        "pending_skip_reason": None,
+    }
+    path.write_text(json.dumps(newer), encoding="utf-8")
+
+    network: dict = {}
+    attach_host_wan_baseline_to_network(network)
+    assert network["direct_speed_test"]["mbps"] == 250.0
+
+
+def test_failed_host_wan_run_keeps_previous_baseline(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "host_wan_baseline.json"
+    monkeypatch.setattr(host_wan_speed.settings, "host_wan_baseline_path", str(path))
+    reset_host_wan_state_for_tests()
+    reset_cloudflare_speed_test_slot_for_tests()
+
+    prior_at = datetime(2026, 8, 9, 10, 0, tzinfo=UTC)
+    host_wan_speed._store_baseline(
+        HostWanBaseline(
+            measured_at=prior_at,
+            download={"ok": True, "mbps": 220.0, "bytes": 1000, "duration_ms": 40, "measured_at": prior_at.isoformat()},
+            upload={"ok": True, "mbps": 55.0, "bytes": 1000, "duration_ms": 100, "measured_at": prior_at.isoformat()},
+        )
+    )
+
+    monkeypatch.setattr(
+        speed_measure,
+        "measure_download_speed",
+        lambda *a, **k: {"ok": False, "error": "timeout", "bytes": 0, "duration_ms": 1, "mbps": 0.0},
+    )
+    monkeypatch.setattr(
+        speed_measure,
+        "measure_upload_speed",
+        lambda *a, **k: {"ok": False, "error": "timeout", "bytes": 0, "duration_ms": 1, "mbps": 0.0},
+    )
+    monkeypatch.setattr(host_wan_speed.time, "sleep", lambda *_: None)
+
+    result = run_host_wan_speed_if_due(_settings(default_speed_test_interval_seconds=1))
+    assert result is not None
+    assert result.download["mbps"] == 220.0
+    network: dict = {}
+    attach_host_wan_baseline_to_network(network)
+    assert network["direct_speed_test"]["mbps"] == 220.0
 
 
 def test_format_speed_test_error_normalizes_curl_429() -> None:

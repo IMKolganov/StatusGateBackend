@@ -33,6 +33,7 @@ See `.env.example`. Notable optional overrides (hardcoded fallbacks when unset):
 | `GOOGLE_PROBE_URL` | Reachability probe through the tunnel |
 | `INTERNET_PING_HOST` | Continuous internet-path ping target |
 | `VPN_NETNS_DNS_SERVERS` | Comma-separated nameservers written into VPN netns `resolv.conf` |
+| `HOST_WAN_BASELINE_PATH` | JSON file shared by API + worker for the latest host WAN snapshot |
 
 VPN checks measure **download + upload** through the tunnel and stamp a **host WAN** baseline onto results when the worker can run it safely (skipped while ephemeral OpenVPN may own host routes).
 
