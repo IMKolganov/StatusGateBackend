@@ -28,7 +28,7 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_has_single_head() -> None:
     heads = _script_directory().get_heads()
-    assert heads == ["018"], f"expected single head 018, got {heads}"
+    assert heads == ["019"], f"expected single head 019, got {heads}"
 
 
 def test_alembic_revision_ids_are_unique() -> None:
@@ -132,13 +132,14 @@ def test_alembic_upgrade_head_on_empty_database() -> None:
 
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "018"
+        assert version == "019"
 
         columns = {column["name"] for column in inspector.get_columns("monitored_components")}
         assert "speed_test_url_template" in columns
         assert "speed_test_interval_seconds" in columns
         assert "speed_test_enabled" in columns
         assert "connection_mode" in columns
+        assert "ip_family" in columns
         assert "group_id" in columns
         assert "sort_order" in columns
         assert "component_groups" in inspector.get_table_names()

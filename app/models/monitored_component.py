@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
-from app.models.enums import CheckType, ConnectionMode
+from app.models.enums import CheckType, ConnectionMode, IpFamily
 
 
 class MonitoredComponent(BaseModel[UUID]):
@@ -53,6 +53,12 @@ class MonitoredComponent(BaseModel[UUID]):
     check_method: Mapped[str] = mapped_column(String(10), nullable=False, default="GET", server_default="GET")
     expected_status_code: Mapped[int] = mapped_column(Integer, nullable=False, default=200, server_default="200")
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default="10")
+    ip_family: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        default=IpFamily.AUTO.value,
+        server_default=IpFamily.AUTO.value,
+    )
     check_type: Mapped[str] = mapped_column(
         String(20),
         nullable=False,

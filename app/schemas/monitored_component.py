@@ -4,7 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.probe_defaults import default_probe_url
-from app.models.enums import VPN_CHECK_TYPES, ConnectionMode
+from app.models.enums import VPN_CHECK_TYPES, ConnectionMode, IpFamily
 from app.schemas.network import NetworkSummary, VpnCheckConfig
 from app.services.speed_test_config import validate_speed_test_url_template
 
@@ -18,6 +18,7 @@ MAX_SPEED_TEST_INTERVAL_SECONDS = 86_400
 
 CHECK_TYPE_PATTERN = r"^(http_status|json|xml|openvpn|xray)$"
 CONNECTION_MODE_PATTERN = r"^(ephemeral|persistent)$"
+IP_FAMILY_PATTERN = r"^(auto|ipv4|ipv6)$"
 
 
 class MonitoredComponentCreate(BaseModel):
@@ -41,6 +42,7 @@ class MonitoredComponentCreate(BaseModel):
     speed_test_enabled: bool | None = None
     expected_status_code: int = Field(default=200, ge=100, le=599)
     timeout_seconds: int = Field(default=10, ge=1, le=300)
+    ip_family: str = Field(default=IpFamily.AUTO.value, pattern=IP_FAMILY_PATTERN)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
     connection_mode: str = Field(default=ConnectionMode.EPHEMERAL.value, pattern=CONNECTION_MODE_PATTERN)
     group_id: UUID | None = None
@@ -102,6 +104,7 @@ class MonitoredComponentUpdate(BaseModel):
     speed_test_enabled: bool | None = None
     expected_status_code: int | None = Field(default=None, ge=100, le=599)
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+    ip_family: str | None = Field(default=None, pattern=IP_FAMILY_PATTERN)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
     connection_mode: str | None = Field(default=None, pattern=CONNECTION_MODE_PATTERN)
     group_id: UUID | None = None
@@ -140,6 +143,7 @@ class MonitoredComponentResponse(BaseModel):
     speed_test_enabled: bool
     expected_status_code: int
     timeout_seconds: int
+    ip_family: str = IpFamily.AUTO.value
     poll_interval_seconds: int | None
     connection_mode: str = ConnectionMode.EPHEMERAL.value
     group_id: UUID | None = None
