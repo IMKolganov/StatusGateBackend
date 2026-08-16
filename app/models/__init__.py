@@ -5,6 +5,7 @@ from app.models.account import Account, account_roles_table
 from app.models.base import Base, BaseModel
 from app.models.check_result import CheckResult
 from app.models.connection_event import ConnectionEvent
+from app.models.component_group import ComponentGroup
 from app.models.component_kind import ComponentKind
 from app.models.monitored_component import MonitoredComponent
 from app.models.incident import Incident
@@ -22,6 +23,7 @@ __all__ = [
     "BaseModel",
     "CheckResult",
     "ConnectionEvent",
+    "ComponentGroup",
     "ComponentKind",
     "Incident",
     "IncidentUpdate",

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
+    from app.models.component_group import ComponentGroup
     from app.models.incident import Incident
     from app.models.monitored_component import MonitoredComponent
 
@@ -24,6 +25,10 @@ class Project(BaseModel[UUID]):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
     monitored_components: Mapped[list["MonitoredComponent"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    component_groups: Mapped[list["ComponentGroup"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
     )

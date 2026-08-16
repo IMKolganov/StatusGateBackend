@@ -43,6 +43,8 @@ class MonitoredComponentCreate(BaseModel):
     timeout_seconds: int = Field(default=10, ge=1, le=300)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
     connection_mode: str = Field(default=ConnectionMode.EPHEMERAL.value, pattern=CONNECTION_MODE_PATTERN)
+    group_id: UUID | None = None
+    sort_order: int = Field(default=0, ge=0, le=1_000_000)
     is_active: bool = True
 
     @model_validator(mode="after")
@@ -102,6 +104,8 @@ class MonitoredComponentUpdate(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
     poll_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
     connection_mode: str | None = Field(default=None, pattern=CONNECTION_MODE_PATTERN)
+    group_id: UUID | None = None
+    sort_order: int | None = Field(default=None, ge=0, le=1_000_000)
     is_active: bool | None = None
 
     @model_validator(mode="after")
@@ -138,6 +142,9 @@ class MonitoredComponentResponse(BaseModel):
     timeout_seconds: int
     poll_interval_seconds: int | None
     connection_mode: str = ConnectionMode.EPHEMERAL.value
+    group_id: UUID | None = None
+    group_name: str | None = None
+    sort_order: int = 0
     last_checked_at: datetime | None
     is_active: bool
     latest_outcome: str | None = None

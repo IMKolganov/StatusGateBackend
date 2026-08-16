@@ -3,17 +3,21 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.cqrs.commands.component_groups import ComponentGroupCommandHandler
 from app.cqrs.commands.component_kinds import ComponentKindCommandHandler
 from app.cqrs.commands.monitored_components import MonitoredComponentCommandHandler
 from app.cqrs.commands.projects import ProjectCommandHandler
 from app.cqrs.common import PaginatedResult, PaginationParams
+from app.cqrs.queries.component_groups import ComponentGroupQueryHandler
 from app.cqrs.queries.component_kinds import ComponentKindQueryHandler
 from app.cqrs.queries.monitored_components import MonitoredComponentQueryHandler
 from app.cqrs.queries.projects import ProjectQueryHandler
+from app.models.component_group import ComponentGroup
 from app.models.component_kind import ComponentKind
 from app.models.enums import VPN_CHECK_TYPES
 from app.models.monitored_component import MonitoredComponent
 from app.models.project import Project
+from app.schemas.component_group import ComponentGroupCreate, ComponentGroupUpdate
 from app.schemas.component_kind import ComponentKindCreate, ComponentKindUpdate
 from app.schemas.monitored_component import MonitoredComponentCreate, MonitoredComponentUpdate
 from app.schemas.project import ProjectCreate, ProjectUpdate
@@ -91,12 +95,54 @@ class ComponentKindService:
         self._commands.commit()
 
 
+class ComponentGroupService:
+    def __init__(self, session: Session) -> None:
+        self._queries = ComponentGroupQueryHandler(session)
+        self._commands = ComponentGroupCommandHandler(session)
+        self._project_queries = ProjectQueryHandler(session)
+
+    def list_by_project(self, project_id: UUID, params: PaginationParams | None = None) -> PaginatedResult[ComponentGroup]:
+        if not self._project_queries.get_by_id(project_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        return self._queries.list_by_project_paginated(project_id, params)
+
+    def get(self, group_id: UUID) -> ComponentGroup:
+        group = self._queries.get_by_id(group_id)
+        if group is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Component group not found")
+        return group
+
+    def create(self, payload: ComponentGroupCreate) -> ComponentGroup:
+        if not self._project_queries.get_by_id(payload.project_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if self._queries.get_by_project_and_slug(payload.project_id, payload.slug):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Group slug already exists in project")
+        return self._commands.create(ComponentGroup(**payload.model_dump()))
+
+    def update(self, group_id: UUID, payload: ComponentGroupUpdate) -> ComponentGroup:
+        group = self.get(group_id)
+        data = payload.model_dump(exclude_unset=True)
+        if "slug" in data and data["slug"] != group.slug:
+            existing = self._queries.get_by_project_and_slug(group.project_id, data["slug"])
+            if existing and existing.id != group.id:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Group slug already exists in project")
+        for key, value in data.items():
+            setattr(group, key, value)
+        return self._commands.update(group)
+
+    def delete(self, group_id: UUID) -> None:
+        group = self.get(group_id)
+        self._commands.delete(group)
+        self._commands.commit()
+
+
 class MonitoredComponentService:
     def __init__(self, session: Session) -> None:
         self._queries = MonitoredComponentQueryHandler(session)
         self._commands = MonitoredComponentCommandHandler(session)
         self._project_queries = ProjectQueryHandler(session)
         self._kind_queries = ComponentKindQueryHandler(session)
+        self._group_queries = ComponentGroupQueryHandler(session)
 
     def list(self, params: PaginationParams | None = None) -> PaginatedResult[MonitoredComponent]:
         return self._queries.list_paginated(params)
@@ -110,6 +156,18 @@ class MonitoredComponentService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Monitored component not found")
         return component
 
+    def _resolve_group(self, project_id: UUID, group_id: UUID | None) -> None:
+        if group_id is None:
+            return
+        group = self._group_queries.get_by_id(group_id)
+        if group is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Component group not found")
+        if group.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Component group must belong to the same project",
+            )
+
     def create(self, payload: MonitoredComponentCreate) -> MonitoredComponent:
         if not self._project_queries.get_by_id(payload.project_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -117,6 +175,7 @@ class MonitoredComponentService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Component kind not found")
         if self._queries.get_by_project_and_slug(payload.project_id, payload.slug):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Component slug already exists in project")
+        self._resolve_group(payload.project_id, payload.group_id)
         data = payload.model_dump()
         if data.get("speed_test_enabled") is None:
             data["speed_test_enabled"] = True
@@ -146,6 +205,8 @@ class MonitoredComponentService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if "component_kind_id" in data and not self._kind_queries.get_by_id(data["component_kind_id"]):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Component kind not found")
+        if "group_id" in data:
+            self._resolve_group(project_id, data["group_id"])
         existing = self._queries.get_by_project_and_slug(project_id, slug)
         if existing and existing.id != component.id:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Component slug already exists in project")

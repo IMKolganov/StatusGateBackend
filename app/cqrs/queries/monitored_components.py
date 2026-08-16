@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.cqrs.common import PaginatedResult, PaginationParams
 from app.cqrs.queries.base import BaseQueryHandler
@@ -34,7 +34,12 @@ class MonitoredComponentQueryHandler(BaseQueryHandler[MonitoredComponent, UUID, 
         stmt = (
             select(MonitoredComponent)
             .where(*filters)
-            .order_by(MonitoredComponent.created_at.desc())
+            .options(selectinload(MonitoredComponent.group))
+            .order_by(
+                MonitoredComponent.sort_order.asc(),
+                MonitoredComponent.name.asc(),
+                MonitoredComponent.created_at.desc(),
+            )
             .offset(pagination.offset)
             .limit(pagination.limit)
         )

@@ -22,10 +22,20 @@ class PublicServiceStatus(BaseModel):
     description: str | None
     environment: str | None
     component_kind: str
+    group_id: UUID | None = None
+    group_name: str | None = None
+    group_sort_order: int | None = None
     status: str = Field(description="Latest check outcome or 'unknown'")
     latency_ms: int | None = None
     checked_at: datetime | None = None
     network_summary: NetworkSummary | None = None
+
+
+class PublicServiceGroupStatus(BaseModel):
+    id: UUID | None = None
+    name: str
+    sort_order: int = 0
+    services: list[PublicServiceStatus]
 
 
 class PublicProjectStatus(BaseModel):
@@ -33,6 +43,7 @@ class PublicProjectStatus(BaseModel):
     name: str
     slug: str
     description: str | None
+    groups: list[PublicServiceGroupStatus] = []
     services: list[PublicServiceStatus]
 
 
@@ -69,7 +80,9 @@ class PublicServiceTimeline(BaseModel):
 
 
 class PublicComponentGroupTimeline(BaseModel):
+    id: UUID | None = None
     name: str
+    sort_order: int = 0
     component_count: int
     uptime_percent: float | None = None
     days: list[PublicDayBar]

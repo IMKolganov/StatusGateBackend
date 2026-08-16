@@ -135,6 +135,8 @@ class MonitoringAdminService:
     @staticmethod
     def enrich_component(component: MonitoredComponent, latest: CheckResult | None) -> MonitoredComponentResponse:
         response = MonitoredComponentResponse.model_validate(component)
+        group = getattr(component, "group", None)
+        response.group_name = group.name if group is not None else None
         if latest is not None:
             response.latest_outcome = latest.outcome
             response.latest_latency_ms = latest.latency_ms
@@ -150,6 +152,10 @@ class MonitoringAdminService:
         return [self.enrich_component(component, latest_map.get(component.id)) for component in components]
 
     def enrich_component_by_id(self, component_id: UUID) -> MonitoredComponentResponse:
-        component = self._component_service.get(component_id)
+        component = self._component_service._queries.get_by_id_with_relations(component_id)
+        if component is None:
+            from fastapi import HTTPException, status
+
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Monitored component not found")
         latest_map = self._results_repo.latest_by_component_ids([component.id])
         return self.enrich_component(component, latest_map.get(component.id))

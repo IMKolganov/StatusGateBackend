@@ -7,6 +7,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, require_access_roles
 from app.api.pagination import to_paginated_response
 from app.cqrs.common import PaginationParams
+from app.schemas.component_group import (
+    ComponentGroupCreate,
+    ComponentGroupResponse,
+    ComponentGroupUpdate,
+)
 from app.schemas.component_kind import (
     ComponentKindCreate,
     ComponentKindResponse,
@@ -19,11 +24,17 @@ from app.schemas.monitored_component import (
 )
 from app.schemas.pagination import paginated_of
 from app.schemas.project import ProjectCreate, ProjectResponse, ProjectUpdate
-from app.services.catalog_service import ComponentKindService, MonitoredComponentService, ProjectService
+from app.services.catalog_service import (
+    ComponentGroupService,
+    ComponentKindService,
+    MonitoredComponentService,
+    ProjectService,
+)
 from app.services.monitoring_admin_service import MonitoringAdminService
 
 PaginatedProjectResponse = paginated_of(ProjectResponse)
 PaginatedComponentKindResponse = paginated_of(ComponentKindResponse)
+PaginatedComponentGroupResponse = paginated_of(ComponentGroupResponse)
 PaginatedMonitoredComponentResponse = paginated_of(MonitoredComponentResponse)
 
 router = APIRouter(prefix="/api/admin", tags=["admin-catalog"])
@@ -35,6 +46,10 @@ def get_project_service(db: Session = Depends(get_db)) -> Generator[ProjectServi
 
 def get_component_kind_service(db: Session = Depends(get_db)) -> Generator[ComponentKindService, None, None]:
     yield ComponentKindService(db)
+
+
+def get_component_group_service(db: Session = Depends(get_db)) -> Generator[ComponentGroupService, None, None]:
+    yield ComponentGroupService(db)
 
 
 def get_monitored_component_service(db: Session = Depends(get_db)) -> Generator[MonitoredComponentService, None, None]:
@@ -141,6 +156,55 @@ def delete_component_kind(
     service.delete(kind_id)
 
 
+@router.get("/component-groups", response_model=PaginatedComponentGroupResponse)
+def list_component_groups(
+    project_id: UUID = Query(...),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    _=Depends(require_access_roles("admin", "operator", "viewer")),
+    service: ComponentGroupService = Depends(get_component_group_service),
+):
+    result = service.list_by_project(project_id, PaginationParams(offset=offset, limit=limit))
+    return to_paginated_response(result, ComponentGroupResponse.model_validate)
+
+
+@router.post("/component-groups", response_model=ComponentGroupResponse, status_code=status.HTTP_201_CREATED)
+def create_component_group(
+    payload: ComponentGroupCreate,
+    _=Depends(require_access_roles("admin", "operator")),
+    service: ComponentGroupService = Depends(get_component_group_service),
+):
+    return ComponentGroupResponse.model_validate(service.create(payload))
+
+
+@router.get("/component-groups/{group_id}", response_model=ComponentGroupResponse)
+def get_component_group(
+    group_id: UUID,
+    _=Depends(require_access_roles("admin", "operator", "viewer")),
+    service: ComponentGroupService = Depends(get_component_group_service),
+):
+    return ComponentGroupResponse.model_validate(service.get(group_id))
+
+
+@router.patch("/component-groups/{group_id}", response_model=ComponentGroupResponse)
+def update_component_group(
+    group_id: UUID,
+    payload: ComponentGroupUpdate,
+    _=Depends(require_access_roles("admin", "operator")),
+    service: ComponentGroupService = Depends(get_component_group_service),
+):
+    return ComponentGroupResponse.model_validate(service.update(group_id, payload))
+
+
+@router.delete("/component-groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_component_group(
+    group_id: UUID,
+    _=Depends(require_access_roles("admin")),
+    service: ComponentGroupService = Depends(get_component_group_service),
+):
+    service.delete(group_id)
+
+
 @router.get("/monitored-components", response_model=PaginatedMonitoredComponentResponse)
 def list_monitored_components(
     project_id: UUID | None = None,
@@ -170,7 +234,7 @@ def create_monitored_component(
     service: MonitoredComponentService = Depends(get_monitored_component_service),
     monitoring: MonitoringAdminService = Depends(get_monitoring_admin_service),
 ):
-    return monitoring.enrich_component(service.create(payload), None)
+    return monitoring.enrich_component_by_id(service.create(payload).id)
 
 
 @router.get("/monitored-components/{component_id}", response_model=MonitoredComponentResponse)
