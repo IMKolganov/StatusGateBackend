@@ -137,6 +137,9 @@ class MonitoredComponentService:
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"{field} is only supported for VPN check types",
                 )
+        # HTTP forms send speed_test_enabled: null; column is NOT NULL — treat null as "leave unchanged".
+        if "speed_test_enabled" in data and data["speed_test_enabled"] is None:
+            data.pop("speed_test_enabled")
         project_id = data.get("project_id", component.project_id)
         slug = data.get("slug", component.slug)
         if "project_id" in data and not self._project_queries.get_by_id(data["project_id"]):

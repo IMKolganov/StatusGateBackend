@@ -93,6 +93,24 @@ class TestGlobalExceptionMiddlewareLeftovers:
         assert response.status_code == 409
         assert "already exists" in response.json()["message"].lower()
 
+    def test_maps_not_null_integrity_error_message(self) -> None:
+        app = FastAPI()
+        app.add_middleware(TraceIdMiddleware)
+        register_exception_handlers(app)
+
+        @app.get("/boom-not-null")
+        def boom_not_null():
+            raise IntegrityError(
+                "INSERT",
+                {},
+                Exception('null value in column "speed_test_enabled" violates not-null constraint'),
+            )
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get("/boom-not-null")
+        assert response.status_code == 409
+        assert "required field" in response.json()["message"].lower()
+
     def test_wraps_success_payload(self) -> None:
         client = TestClient(_mini_app())
         response = client.get("/plain-ok")

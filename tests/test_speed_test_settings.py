@@ -914,3 +914,38 @@ class TestSpeedTestMonitoringApi:
             },
         )
         assert response.status_code == 422
+
+    def test_http_update_ignores_null_speed_test_enabled(self, client: TestClient, admin_headers: dict) -> None:
+        """Frontend sends speed_test_enabled: null for HTTP edits; must not violate NOT NULL."""
+        project = _create_project(client)
+        created = client.post(
+            "/api/admin/monitored-components",
+            json={
+                "project_id": project["id"],
+                "component_kind_id": str(WEB_COMPONENT_KIND_ID),
+                "name": "API",
+                "slug": "api-null-speed",
+                "check_url": "https://example.com/health",
+                "check_type": "http_status",
+                "expected_status_code": 200,
+                "is_active": True,
+            },
+        )
+        assert created.status_code == 201, created.text
+        component = _api_data(created)
+        assert component["speed_test_enabled"] is True
+
+        response = client.patch(
+            f"/api/admin/monitored-components/{component['id']}",
+            json={
+                "name": "API renamed",
+                "speed_test_bytes": None,
+                "speed_test_url_template": None,
+                "speed_test_interval_seconds": None,
+                "speed_test_enabled": None,
+            },
+        )
+        assert response.status_code == 200, response.text
+        updated = _api_data(response)
+        assert updated["name"] == "API renamed"
+        assert updated["speed_test_enabled"] is True
