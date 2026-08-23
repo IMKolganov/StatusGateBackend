@@ -280,6 +280,81 @@ def test_encrypt_decrypt_client_secret_roundtrip():
     assert decrypt_client_secret("legacy-plain") == "legacy-plain"
 
 
+def test_preferred_new_slug_includes_server_id():
+    from app.services.datagate.import_service import _preferred_new_slug
+    from app.services.datagate.client import DataGateServer
+
+    server = DataGateServer(id=42, server_type=0, server_name="Norway 1 UDP", proto="udp")
+    assert _preferred_new_slug(server) == "norway-1-udp-dg42"
+
+
+def test_score_pair_rejects_tcp_udp_cross_link():
+    udp_server = DataGateServer(id=1, server_type=0, server_name="Norway 1 udp", proto="udp", host="n1.example.com")
+    tcp_local = LocalVpnComponent(
+        id=uuid4(),
+        name="🇳🇴 Norway 1 tcp",
+        slug="norway-1-tcp",
+        check_type="openvpn",
+        config_text="proto tcp\nremote n1.example.com 443\n",
+    )
+    score, _ = score_pair(udp_server, tcp_local)
+    assert score == 0
+
+
+def test_match_servers_keeps_tcp_and_udp_siblings_separate():
+    tcp_local = LocalVpnComponent(
+        id=uuid4(),
+        name="🇳🇴 Norway 1 tcp",
+        slug="norway-1-tcp",
+        check_type="openvpn",
+        config_text="proto tcp\nremote n1.example.com 443\n",
+    )
+    # Existing service without "udp" in the title — still must match udp server via config proto.
+    helsinki = LocalVpnComponent(
+        id=uuid4(),
+        name="🇫🇮 Helsinki 1",
+        slug="helsinki-1",
+        check_type="openvpn",
+        config_text="proto udp\nremote hel.example.com 1194\n",
+    )
+    tcp_server = DataGateServer(
+        id=10, server_type=0, server_name="🇳🇴 Norway 1 tcp", host="n1.example.com", port=443, proto="tcp"
+    )
+    udp_server = DataGateServer(
+        id=11, server_type=0, server_name="🇳🇴 Norway 1 udp", host="n1.example.com", port=1194, proto="udp"
+    )
+    hel_server = DataGateServer(
+        id=12, server_type=0, server_name="🇫🇮 Helsinki 1 udp", host="hel.example.com", port=1194, proto="udp"
+    )
+    buckets = match_servers([tcp_server, udp_server, hel_server], [tcp_local, helsinki])
+    by_server = {m.server.id: m.component.id for m in buckets.matched}
+    assert by_server[10] == tcp_local.id
+    assert by_server[12] == helsinki.id
+    assert 11 in {s.id for s in buckets.new_servers}
+    assert len(buckets.matched) == 2
+
+
+def test_match_servers_breaks_incompatible_existing_link():
+    """Wrong historical link (tcp server → udp service) must rematch, not create a duplicate."""
+    local = LocalVpnComponent(
+        id=uuid4(),
+        name="🇫🇮 Helsinki 1",
+        slug="helsinki-1",
+        check_type="openvpn",
+        config_text="proto udp\nremote hel.example.com 1194\n",
+        datagate_server_id=99,
+    )
+    wrong = DataGateServer(id=99, server_type=0, server_name="Other tcp", host="other.example.com", proto="tcp")
+    right = DataGateServer(
+        id=12, server_type=0, server_name="🇫🇮 Helsinki 1 udp", host="hel.example.com", port=1194, proto="udp"
+    )
+    buckets = match_servers([wrong, right], [local])
+    assert len(buckets.matched) == 1
+    assert buckets.matched[0].server.id == 12
+    assert buckets.matched[0].already_linked is False
+    assert buckets.new_servers[0].id == 99
+
+
 def test_match_servers_does_not_reassign_already_linked_component():
     """Partial selection must not steal a component linked to an omitted server."""
     linked = LocalVpnComponent(

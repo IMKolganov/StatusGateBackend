@@ -13,8 +13,9 @@ from app.middleware.global_exception import GlobalExceptionMiddleware, register_
 from app.middleware.https import RequireHttpsMiddleware
 from app.middleware.trace_id import TraceIdMiddleware
 from app.schemas.health import HealthStatusResponse
+from app.version import __version__
 
-app = FastAPI(title="StatusGate API", version="0.3.0")
+app = FastAPI(title="StatusGate API", version=__version__)
 setup_openapi(app)
 
 app.state.limiter = limiter
@@ -48,4 +49,4 @@ async def health() -> HealthStatusResponse:
     except Exception:
         db_status = "error"
 
-    return HealthStatusResponse(status="ok", database=db_status)
+    return HealthStatusResponse(status="ok", database=db_status, version=__version__)

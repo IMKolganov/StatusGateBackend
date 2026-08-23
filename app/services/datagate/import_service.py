@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.probe_defaults import default_probe_url
@@ -36,6 +37,16 @@ from app.services.datagate.url_validation import validate_datagate_base_url
 def _slugify(value: str, fallback: str = "service") -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug[:100] or fallback
+
+
+def _preferred_new_slug(server: DataGateServer) -> str:
+    """Build a stable slug that includes proto when present to reduce collisions."""
+    base = _slugify(server.server_name)
+    proto = (server.proto or "").lower()
+    if proto in {"tcp", "udp"} and proto not in base:
+        base = _slugify(f"{base}-{proto}")
+    # Always suffix with DataGate id so re-imports of distinct servers never collide.
+    return _slugify(f"{base}-dg{server.id}")
 
 
 class DatagateIntegrationService:
@@ -242,19 +253,28 @@ class DatagateIntegrationService:
             sync_names_question=sync_question,
         )
 
-    def _unique_slug(self, project_id: UUID, base: str, *, exclude_id: UUID | None = None) -> str:
+    def _unique_slug(
+        self,
+        project_id: UUID,
+        base: str,
+        *,
+        reserved: set[str],
+        exclude_id: UUID | None = None,
+    ) -> str:
         slug = _slugify(base)
         candidate = slug
         n = 2
         while True:
-            existing = self._session.scalar(
-                select(MonitoredComponent).where(
-                    MonitoredComponent.project_id == project_id,
-                    MonitoredComponent.slug == candidate,
+            if candidate not in reserved:
+                existing = self._session.scalar(
+                    select(MonitoredComponent).where(
+                        MonitoredComponent.project_id == project_id,
+                        MonitoredComponent.slug == candidate,
+                    )
                 )
-            )
-            if existing is None or (exclude_id is not None and existing.id == exclude_id):
-                return candidate
+                if existing is None or (exclude_id is not None and existing.id == exclude_id):
+                    reserved.add(candidate)
+                    return candidate
             candidate = f"{slug}-{n}"[:100]
             n += 1
 
@@ -282,6 +302,7 @@ class DatagateIntegrationService:
         external_id = f"statusgate:{project_id}"
         items: list[DatagateImportItemResult] = []
         created = updated = skipped = errors = 0
+        reserved_slugs = {c.slug for c in components}
 
         for match in matched:
             component = by_id.get(match.component.id)
@@ -352,11 +373,12 @@ class DatagateIntegrationService:
                     )
                     max_sort += 10
                     kind_id = XRAY_COMPONENT_KIND_ID if server.check_type == "xray" else OPENVPN_COMPONENT_KIND_ID
+                    slug = self._unique_slug(project_id, _preferred_new_slug(server), reserved=reserved_slugs)
                     component = MonitoredComponent(
                         project_id=project_id,
                         component_kind_id=kind_id,
                         name=server.server_name,
-                        slug=self._unique_slug(project_id, server.server_name),
+                        slug=slug,
                         check_url=(server.api_url or "").strip() or default_probe_url(),
                         check_method="GET",
                         check_type=server.check_type,
@@ -372,8 +394,23 @@ class DatagateIntegrationService:
                         datagate_server_id=server.id,
                         datagate_common_name=cn,
                     )
-                    self._session.add(component)
-                    self._session.flush()
+                    try:
+                        with self._session.begin_nested():
+                            self._session.add(component)
+                            self._session.flush()
+                    except IntegrityError as exc:
+                        errors += 1
+                        reserved_slugs.discard(slug)
+                        detail = str(getattr(exc, "orig", exc))
+                        items.append(
+                            DatagateImportItemResult(
+                                server_id=server.id,
+                                server_name=server.server_name,
+                                action="error",
+                                message=f"Database conflict: {detail}",
+                            )
+                        )
+                        continue
                     created += 1
                     items.append(
                         DatagateImportItemResult(
@@ -381,6 +418,7 @@ class DatagateIntegrationService:
                             server_name=server.server_name,
                             action="created",
                             component_id=component.id,
+                            message=f"slug={slug}",
                         )
                     )
                 except DataGateApiError as exc:
