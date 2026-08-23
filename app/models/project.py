@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from app.models.component_group import ComponentGroup
+    from app.models.datagate_integration import DatagateIntegration
     from app.models.incident import Incident
     from app.models.monitored_component import MonitoredComponent
 
@@ -34,5 +35,10 @@ class Project(BaseModel[UUID]):
     )
     incidents: Mapped[list["Incident"]] = relationship(
         back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    datagate_integration: Mapped["DatagateIntegration | None"] = relationship(
+        back_populates="project",
+        uselist=False,
         cascade="all, delete-orphan",
     )

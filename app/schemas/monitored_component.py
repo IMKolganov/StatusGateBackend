@@ -149,6 +149,8 @@ class MonitoredComponentResponse(BaseModel):
     group_id: UUID | None = None
     group_name: str | None = None
     sort_order: int = 0
+    datagate_server_id: int | None = None
+    datagate_common_name: str | None = None
     last_checked_at: datetime | None
     is_active: bool
     latest_outcome: str | None = None
