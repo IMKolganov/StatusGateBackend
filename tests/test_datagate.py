@@ -280,6 +280,14 @@ def test_encrypt_decrypt_client_secret_roundtrip():
     assert decrypt_client_secret("legacy-plain") == "legacy-plain"
 
 
+def test_preferred_new_slug_includes_server_id():
+    from app.services.datagate.import_service import _preferred_new_slug
+    from app.services.datagate.client import DataGateServer
+
+    server = DataGateServer(id=42, server_type=0, server_name="Norway 1 UDP", proto="udp")
+    assert _preferred_new_slug(server) == "norway-1-udp-dg42"
+
+
 def test_match_servers_does_not_reassign_already_linked_component():
     """Partial selection must not steal a component linked to an omitted server."""
     linked = LocalVpnComponent(
