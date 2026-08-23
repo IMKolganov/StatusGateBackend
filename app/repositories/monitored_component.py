@@ -17,6 +17,7 @@ class MonitoredComponentRepository(Repository[MonitoredComponent, UUID]):
             .options(
                 selectinload(MonitoredComponent.project),
                 selectinload(MonitoredComponent.component_kind),
+                selectinload(MonitoredComponent.group),
             )
             .where(MonitoredComponent.id == component_id)
         )

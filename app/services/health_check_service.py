@@ -7,13 +7,67 @@ from typing import Any
 import httpx
 
 from app.models.check_result import CheckResult
-from app.models.enums import VPN_CHECK_TYPES, CheckOutcome, CheckType
+from app.models.enums import VPN_CHECK_TYPES, CheckOutcome, CheckType, IpFamily
 from app.models.monitored_component import MonitoredComponent
+from app.services.host_egress_ip import get_checker_egress_ip
+from app.services.http_client import httpx_client, normalize_ip_family
 from app.services.speed_test_config import SpeedTestRunContext
 from app.services.vpn_check_service import run_vpn_health_check
 
 _XML_PREFIX_RE = re.compile(r"^\s*(<\?xml|<[!?])", re.IGNORECASE)
 _XML_TAG_RE = re.compile(r"<\s*\w+[\s>]", re.IGNORECASE)
+
+# Peer closed/reset with no HTTP status — often nginx `deny all` / edge allowlist,
+# not an application outage (403 never arrives).
+_NO_HTTP_RESPONSE_HINTS = (
+    "disconnected without sending a response",
+    "server disconnected",
+    "connection reset",
+    "connection closed",
+    "remote end closed connection",
+    "incomplete message",
+    "peer closed connection",
+)
+
+FAILURE_MODE_NO_HTTP_RESPONSE = "no_http_response"
+
+
+def _is_no_http_response(exc: BaseException) -> bool:
+    """True when the peer closed/reset without producing an HTTP status line."""
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return True
+    message = str(exc).lower()
+    return any(hint in message for hint in _NO_HTTP_RESPONSE_HINTS)
+
+
+def _no_http_response_details(
+    check_type: str,
+    exc: BaseException,
+    *,
+    ip_family: str,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "check_type": check_type,
+        "failure_mode": FAILURE_MODE_NO_HTTP_RESPONSE,
+        "transport_error": str(exc),
+        "ip_family": ip_family,
+    }
+    egress_ip = get_checker_egress_ip(ip_family=ip_family)
+    if egress_ip:
+        details["egress_ip"] = egress_ip
+        details["network"] = {"probe": {"exit_ip": egress_ip}}
+    return details
+
+
+def _no_http_response_message(exc: BaseException, egress_ip: str | None, *, ip_family: str) -> str:
+    base = (
+        "No HTTP response — peer closed the connection without a status code "
+        "(often an edge IP allowlist / nginx deny, not the origin app being down). "
+        f"IP family: {ip_family}. Transport: {exc}"
+    )
+    if egress_ip:
+        return f"{base} Checker egress IP: {egress_ip}."
+    return base
 
 
 def _is_xml_body(body: str, content_type: str | None) -> bool:
@@ -82,12 +136,15 @@ def run_health_check(
 def _run_http_health_check(component: MonitoredComponent) -> CheckResult:
     started = time.perf_counter()
     checked_at = datetime.now(UTC)
+    ip_family = normalize_ip_family(getattr(component, "ip_family", None) or IpFamily.AUTO.value)
 
     try:
-        with httpx.Client(timeout=component.timeout_seconds, follow_redirects=True) as client:
+        with httpx_client(timeout=component.timeout_seconds, ip_family=ip_family) as client:
             response = client.request(component.check_method.upper(), component.check_url)
         latency_ms = int((time.perf_counter() - started) * 1000)
         outcome, error_message, details = _evaluate_body(component, response)
+        if details is not None:
+            details["ip_family"] = ip_family
         return CheckResult(
             monitored_component_id=component.id,
             checked_at=checked_at,
@@ -106,10 +163,27 @@ def _run_http_health_check(component: MonitoredComponent) -> CheckResult:
             latency_ms=latency_ms,
             http_status_code=None,
             error_message=f"Request timed out after {component.timeout_seconds}s",
-            details={"check_type": component.check_type},
+            details={"check_type": component.check_type, "ip_family": ip_family},
         )
     except httpx.HTTPError as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
+        if _is_no_http_response(exc):
+            details = _no_http_response_details(component.check_type, exc, ip_family=ip_family)
+            egress_ip = details.get("egress_ip")
+            return CheckResult(
+                monitored_component_id=component.id,
+                checked_at=checked_at,
+                # Keep outcome=error (not down): no status code arrived to compare.
+                outcome=CheckOutcome.ERROR.value,
+                latency_ms=latency_ms,
+                http_status_code=None,
+                error_message=_no_http_response_message(
+                    exc,
+                    egress_ip if isinstance(egress_ip, str) else None,
+                    ip_family=ip_family,
+                ),
+                details=details,
+            )
         return CheckResult(
             monitored_component_id=component.id,
             checked_at=checked_at,
@@ -117,5 +191,5 @@ def _run_http_health_check(component: MonitoredComponent) -> CheckResult:
             latency_ms=latency_ms,
             http_status_code=None,
             error_message=str(exc),
-            details={"check_type": component.check_type},
+            details={"check_type": component.check_type, "ip_family": ip_family},
         )

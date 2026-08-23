@@ -24,6 +24,14 @@ class ConnectionMode(str, enum.Enum):
     PERSISTENT = "persistent"
 
 
+class IpFamily(str, enum.Enum):
+    """Outbound address family for HTTP checks / host probes."""
+
+    AUTO = "auto"
+    IPV4 = "ipv4"
+    IPV6 = "ipv6"
+
+
 class ConnectionEventType(str, enum.Enum):
     TUNNEL_UP = "tunnel_up"
     TUNNEL_DOWN = "tunnel_down"
