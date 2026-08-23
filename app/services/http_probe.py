@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 
 from app.core.probe_defaults import default_probe_url, google_probe_url
+from app.models.enums import IpFamily
+from app.services.http_client import httpx_client
 
 __all__ = [
     "DEFAULT_PROBE_URL",
@@ -36,16 +38,14 @@ def _probe_endpoint(
     proxy_url: str | None = None,
     *,
     netns: str | None = None,
+    ip_family: str = IpFamily.AUTO.value,
 ) -> dict[str, Any]:
     if netns:
-        return _probe_endpoint_via_curl(url, timeout, netns=netns)
+        return _probe_endpoint_via_curl(url, timeout, netns=netns, ip_family=ip_family)
 
     started = time.perf_counter()
     try:
-        client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
-        if proxy_url:
-            client_kwargs["proxy"] = proxy_url
-        with httpx.Client(**client_kwargs) as client:
+        with httpx_client(timeout=timeout, proxy=proxy_url, ip_family=ip_family) as client:
             response = client.get(url)
         latency_ms = int((time.perf_counter() - started) * 1000)
         body = response.text.strip()
@@ -57,6 +57,7 @@ def _probe_endpoint(
             "latency_ms": latency_ms,
             "exit_ip": exit_ip,
             "body_preview": body[:200] if body else None,
+            "ip_family": ip_family,
         }
     except httpx.HTTPError as exc:
         return {
@@ -64,10 +65,17 @@ def _probe_endpoint(
             "url": url,
             "error": str(exc),
             "latency_ms": int((time.perf_counter() - started) * 1000),
+            "ip_family": ip_family,
         }
 
 
-def _probe_endpoint_via_curl(url: str, timeout: float, *, netns: str) -> dict[str, Any]:
+def _probe_endpoint_via_curl(
+    url: str,
+    timeout: float,
+    *,
+    netns: str,
+    ip_family: str = IpFamily.AUTO.value,
+) -> dict[str, Any]:
     started = time.perf_counter()
     cmd = [
         "ip",
@@ -77,12 +85,20 @@ def _probe_endpoint_via_curl(url: str, timeout: float, *, netns: str) -> dict[st
         "curl",
         "-sS",
         "-L",
-        "--max-time",
-        str(max(1, int(timeout))),
-        "-w",
-        "\n__HTTP_CODE__:%{http_code}",
-        url,
     ]
+    if ip_family == IpFamily.IPV4.value:
+        cmd.append("-4")
+    elif ip_family == IpFamily.IPV6.value:
+        cmd.append("-6")
+    cmd.extend(
+        [
+            "--max-time",
+            str(max(1, int(timeout))),
+            "-w",
+            "\n__HTTP_CODE__:%{http_code}",
+            url,
+        ]
+    )
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2, check=False)
         latency_ms = int((time.perf_counter() - started) * 1000)

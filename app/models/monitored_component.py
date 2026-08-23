@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from app.models.check_result import CheckResult
+    from app.models.component_group import ComponentGroup
     from app.models.component_kind import ComponentKind
     from app.models.connection_event import ConnectionEvent
     from app.models.project import Project
@@ -16,7 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
-from app.models.enums import CheckType, ConnectionMode
+from app.models.enums import CheckType, ConnectionMode, IpFamily
 
 
 class MonitoredComponent(BaseModel[UUID]):
@@ -38,6 +39,12 @@ class MonitoredComponent(BaseModel[UUID]):
         nullable=False,
         index=True,
     )
+    group_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("component_groups.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -46,6 +53,12 @@ class MonitoredComponent(BaseModel[UUID]):
     check_method: Mapped[str] = mapped_column(String(10), nullable=False, default="GET", server_default="GET")
     expected_status_code: Mapped[int] = mapped_column(Integer, nullable=False, default=200, server_default="200")
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default="10")
+    ip_family: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        default=IpFamily.AUTO.value,
+        server_default=IpFamily.AUTO.value,
+    )
     check_type: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -58,17 +71,21 @@ class MonitoredComponent(BaseModel[UUID]):
     speed_test_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     speed_test_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     poll_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     connection_mode: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         default=ConnectionMode.EPHEMERAL.value,
         server_default=ConnectionMode.EPHEMERAL.value,
     )
+    datagate_server_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    datagate_common_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
     project: Mapped["Project"] = relationship(back_populates="monitored_components")
     component_kind: Mapped["ComponentKind"] = relationship()
+    group: Mapped["ComponentGroup | None"] = relationship(back_populates="monitored_components")
     check_results: Mapped[list["CheckResult"]] = relationship(
         back_populates="monitored_component",
         cascade="all, delete-orphan",

@@ -37,6 +37,17 @@ See `.env.example`. Notable optional overrides (hardcoded fallbacks when unset):
 
 VPN checks measure **download + upload** through the tunnel and stamp a **host WAN** baseline onto results when the worker can run it safely (skipped while ephemeral OpenVPN may own host routes).
 
+### HTTP check failure modes (edge vs origin)
+
+| Situation | Outcome | Notes |
+|-----------|---------|--------|
+| Response status ≠ expected | `down` | Origin answered; status mismatch |
+| Request timed out | `timeout` | No usable response in time |
+| Peer closes/resets with **no HTTP status** (e.g. nginx `allow …; deny all;`) | `error` (`failure_mode=no_http_response`) | Often edge policy, not app outage; expected codes never apply |
+| Other transport/HTTP client errors | `error` | Connect refused, TLS, DNS, etc. |
+
+When `no_http_response` is recorded, results may include `egress_ip` (and surface it as egress/exit IP in admin diagnostics) so operators can update allowlists. Each HTTP service has `ip_family` (`auto` | `ipv4` | `ipv6`) so dual-stack checkers can force the family that matches the allowlist. Prefer allowing the Status Gate worker egress, moving the health URL behind an internal/allowlisted path, or using an Xray/OpenVPN check type instead of a public locked-down HTTP endpoint.
+
 ## Local development
 
 ```bash

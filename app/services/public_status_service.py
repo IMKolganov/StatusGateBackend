@@ -24,6 +24,7 @@ from app.schemas.public_status import (
     PublicDayIncident,
     PublicProjectStatus,
     PublicProjectSummary,
+    PublicServiceGroupStatus,
     PublicServiceStatus,
     PublicServiceTimeline,
     PublicSystemStatus,
@@ -56,6 +57,7 @@ ACTIVE_INCIDENT_STATUSES = {
     IncidentUpdateStatus.MONITORING.value,
 }
 STATUS_PRIORITY = {"outage": 3, "degraded": 2, "operational": 1, "no_data": 0}
+UNGROUPED_LABEL = "Ungrouped"
 
 
 class PublicStatusService:
@@ -96,29 +98,17 @@ class PublicStatusService:
         components = self._load_components(project.id)
         latest_by_component = self._latest_check_results([component.id for component in components])
 
-        services = []
+        services: list[PublicServiceStatus] = []
         for component in components:
             latest = latest_by_component.get(component.id)
-            services.append(
-                PublicServiceStatus(
-                    id=component.id,
-                    name=component.name,
-                    slug=component.slug,
-                    description=component.description,
-                    environment=component.environment,
-                    component_kind=component.component_kind.name,
-                    status=latest[0] if latest else "unknown",
-                    latency_ms=latest[1] if latest else None,
-                    checked_at=latest[2] if latest else None,
-                    network_summary=latest[3] if latest else None,
-                )
-            )
+            services.append(_public_service_status(component, latest))
 
         return PublicProjectStatus(
             id=project.id,
             name=project.name,
             slug=project.slug,
             description=project.description,
+            groups=_nest_services_by_group(services, components),
             services=services,
         )
 
@@ -245,26 +235,35 @@ class PublicStatusService:
         checks_by_component_day = self._day_stats_by_component_day(component_ids, range_start, range_end)
         timeline_incidents = self._load_timeline_incidents(project.id, range_start, range_end)
 
-        groups_map: dict[str, list[MonitoredComponent]] = defaultdict(list)
+        groups_map: dict[tuple[int, str, UUID | None], list[MonitoredComponent]] = defaultdict(list)
         for component in components:
-            groups_map[component.component_kind.name].append(component)
+            group = component.group
+            if group is not None and group.is_active:
+                key = (group.sort_order, group.name, group.id)
+            else:
+                key = (10**9, UNGROUPED_LABEL, None)
+            groups_map[key].append(component)
 
         groups: list[PublicComponentGroupTimeline] = []
         latest_by_component = self._latest_check_results(component_ids)
-        for kind_name in sorted(groups_map):
-            kind_components = sorted(groups_map[kind_name], key=lambda item: item.name.lower())
-            kind_component_ids = {component.id for component in kind_components}
+        for group_key in sorted(groups_map, key=lambda item: (item[0], item[1].lower())):
+            group_sort_order, group_name, group_id = group_key
+            group_components = sorted(
+                groups_map[group_key],
+                key=lambda item: (item.sort_order, item.name.lower()),
+            )
+            group_component_ids = {component.id for component in group_components}
             service_timelines: list[PublicServiceTimeline] = []
             group_day_statuses = {
                 day: status
                 for day, status in _project_day_statuses(
-                    [component.id for component in kind_components],
+                    [component.id for component in group_components],
                     day_keys,
                     checks_by_component_day,
                 ).items()
             }
 
-            for component in kind_components:
+            for component in group_components:
                 service_days: list[PublicDayBar] = []
                 service_stats = empty_day_stats()
 
@@ -290,14 +289,14 @@ class PublicStatusService:
                         id=component.id,
                         name=component.name,
                         slug=component.slug,
-                        component_kind=kind_name,
+                        component_kind=component.component_kind.name,
                         uptime_percent=availability_from_stats(service_stats),
                         days=service_days,
                     )
                 )
 
             group_stats = _sum_stats(
-                [component.id for component in kind_components],
+                [component.id for component in group_components],
                 day_keys,
                 checks_by_component_day,
             )
@@ -306,12 +305,12 @@ class PublicStatusService:
                     day=day,
                     day_status=group_day_statuses[day],
                     stats=_sum_stats(
-                        [component.id for component in kind_components],
+                        [component.id for component in group_components],
                         [day],
                         checks_by_component_day,
                     ).with_downtime(
                         _max_downtime_for_day(
-                            [component.id for component in kind_components],
+                            [component.id for component in group_components],
                             day,
                             checks_by_component_day,
                         )
@@ -319,15 +318,17 @@ class PublicStatusService:
                     incidents=_day_incidents_for(
                         timeline_incidents,
                         day,
-                        component_ids=kind_component_ids,
+                        component_ids=group_component_ids,
                     ),
                 )
                 for day in day_keys
             ]
             groups.append(
                 PublicComponentGroupTimeline(
-                    name=kind_name,
-                    component_count=len(kind_components),
+                    id=group_id,
+                    name=group_name,
+                    sort_order=group_sort_order if group_id is not None else 10**9,
+                    component_count=len(group_components),
                     uptime_percent=availability_from_stats(group_stats),
                     days=group_days,
                     services=service_timelines,
@@ -354,8 +355,14 @@ class PublicStatusService:
                     MonitoredComponent.project_id == project_id,
                     MonitoredComponent.is_active.is_(True),
                 )
-                .options(selectinload(MonitoredComponent.component_kind))
-                .order_by(MonitoredComponent.name.asc())
+                .options(
+                    selectinload(MonitoredComponent.component_kind),
+                    selectinload(MonitoredComponent.group),
+                )
+                .order_by(
+                    MonitoredComponent.sort_order.asc(),
+                    MonitoredComponent.name.asc(),
+                )
             ).all()
         )
 
@@ -1027,3 +1034,56 @@ def _status_label(outcome: str) -> str:
         CheckOutcome.ERROR.value: "Error",
     }
     return labels.get(outcome, outcome.title())
+
+
+def _public_service_status(
+    component: MonitoredComponent,
+    latest: tuple[str, int | None, datetime | None, NetworkSummary | None] | None,
+) -> PublicServiceStatus:
+    group = component.group
+    group_active = group is not None and group.is_active
+    return PublicServiceStatus(
+        id=component.id,
+        name=component.name,
+        slug=component.slug,
+        description=component.description,
+        environment=component.environment,
+        component_kind=component.component_kind.name,
+        group_id=group.id if group_active else None,
+        group_name=group.name if group_active else None,
+        group_sort_order=group.sort_order if group_active else None,
+        status=latest[0] if latest else "unknown",
+        latency_ms=latest[1] if latest else None,
+        checked_at=latest[2] if latest else None,
+        network_summary=latest[3] if latest else None,
+    )
+
+
+def _nest_services_by_group(
+    services: list[PublicServiceStatus],
+    components: list[MonitoredComponent],
+) -> list[PublicServiceGroupStatus]:
+    by_id = {service.id: service for service in services}
+    buckets: dict[tuple[int, str, UUID | None], list[PublicServiceStatus]] = defaultdict(list)
+    for component in components:
+        service = by_id.get(component.id)
+        if service is None:
+            continue
+        group = component.group
+        if group is not None and group.is_active:
+            key = (group.sort_order, group.name, group.id)
+        else:
+            key = (10**9, UNGROUPED_LABEL, None)
+        buckets[key].append(service)
+
+    nested: list[PublicServiceGroupStatus] = []
+    for sort_order, name, group_id in sorted(buckets, key=lambda item: (item[0], item[1].lower())):
+        nested.append(
+            PublicServiceGroupStatus(
+                id=group_id,
+                name=name,
+                sort_order=sort_order if group_id is not None else 10**9,
+                services=buckets[(sort_order, name, group_id)],
+            )
+        )
+    return nested

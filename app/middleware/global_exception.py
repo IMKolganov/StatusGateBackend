@@ -133,7 +133,7 @@ def _map_exception_to_response(request: Request, exc: Exception, *, notify_logge
     elif isinstance(exc, PermissionError):
         status_code, message, detail = 403, str(exc) or "Forbidden.", str(exc)
     elif isinstance(exc, IntegrityError):
-        status_code, message, detail = 409, "A resource already exists with the same key.", _exception_detail(exc)
+        status_code, message, detail = 409, _integrity_error_message(exc), _exception_detail(exc)
 
     return _error_json(request, status_code, message, detail=detail)
 
@@ -214,3 +214,14 @@ def _exception_detail(exc: Exception) -> str:
     while current.__context__ is not None and current.__context__ is not current.__cause__:
         current = current.__context__
     return str(current)
+
+
+def _integrity_error_message(exc: IntegrityError) -> str:
+    detail = _exception_detail(exc).lower()
+    if "not-null" in detail or "not null" in detail or "null value" in detail:
+        return "A required field was missing or null."
+    if "check constraint" in detail or "violates check" in detail:
+        return "A value failed a database check constraint."
+    if "foreign key" in detail:
+        return "A referenced resource does not exist."
+    return "A resource already exists with the same key."
