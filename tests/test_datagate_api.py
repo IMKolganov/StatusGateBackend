@@ -91,6 +91,70 @@ class TestDatagateIntegrationApi:
 
 
 class TestDatagateImportService:
+    def test_partial_import_does_not_reassign_linked_component(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-relink", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        local = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Helsinki 1 openvpn tcp",
+            slug="helsinki-1",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto tcp\nremote hel.example.com 443\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            datagate_server_id=1,
+            datagate_common_name="statusgate-dg-relink-1",
+        )
+        db_session.add(local)
+        db_session.commit()
+
+        selected = DataGateServer(
+            id=2,
+            server_type=0,
+            server_name="Helsinki 1",
+            host="hel.example.com",
+            port=443,
+            proto="tcp",
+            api_url="https://b.example/",
+        )
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = [
+            DataGateServer(id=1, server_type=0, server_name="Helsinki old", host="hel.example.com", proto="tcp"),
+            selected,
+        ]
+        mock_client.enrich_server.side_effect = lambda s: s
+        mock_client.ensure_config_text.return_value = "client\nproto tcp\n"
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        result = service.import_servers(
+            project.id,
+            DatagateImportRequest(
+                sync_names=True,
+                refresh_configs=True,
+                import_new=True,
+                server_ids=[2],
+            ),
+        )
+        assert result.updated == 0
+        assert result.created == 1
+        db_session.refresh(local)
+        assert local.datagate_server_id == 1
+        created = db_session.query(MonitoredComponent).filter_by(datagate_server_id=2).one()
+        assert created.id != local.id
+
     def test_partial_import_matches_only_selected_servers(self, db_session: Session) -> None:
         project = Project(name="DataGate", slug="dg", description=None, is_active=True)
         db_session.add(project)

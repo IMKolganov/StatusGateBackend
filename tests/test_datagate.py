@@ -280,8 +280,16 @@ def test_encrypt_decrypt_client_secret_roundtrip():
     assert decrypt_client_secret("legacy-plain") == "legacy-plain"
 
 
-def test_match_servers_partial_selection_does_not_steal_component():
-    """Unselected competing servers must not consume the local match candidate."""
+def test_match_servers_does_not_reassign_already_linked_component():
+    """Partial selection must not steal a component linked to an omitted server."""
+    linked = LocalVpnComponent(
+        id=uuid4(),
+        name="Helsinki 1 openvpn tcp",
+        slug="helsinki-1",
+        check_type="openvpn",
+        datagate_server_id=1,
+        config_text="proto tcp\nremote hel.example.com 443\n",
+    )
     selected = DataGateServer(
         id=2,
         server_type=0,
@@ -290,15 +298,7 @@ def test_match_servers_partial_selection_does_not_steal_component():
         port=443,
         proto="tcp",
     )
-    # If both were matched together, id=1 could win first and steal the component.
-    component = LocalVpnComponent(
-        id=uuid4(),
-        name="Helsinki 1 openvpn tcp",
-        slug="helsinki-1",
-        check_type="openvpn",
-        config_text="proto tcp\nremote hel.example.com 443\n",
-    )
-    buckets = match_servers([selected], [component])
-    assert len(buckets.matched) == 1
-    assert buckets.matched[0].server.id == 2
-    assert buckets.new_servers == []
+    buckets = match_servers([selected], [linked])
+    assert buckets.matched == []
+    assert buckets.new_servers[0].id == 2
+    assert buckets.unmatched_local[0].datagate_server_id == 1

@@ -156,13 +156,16 @@ def match_servers(
         used_component_ids.add(component.id)
         used_server_ids.add(server.id)
 
-    # 2) Best unique fuzzy matches
+    # 2) Best unique fuzzy matches — never reassign a component that is already linked
+    # to some DataGate server (those only match via step 1 when that server is present).
     candidates: list[tuple[float, bool, DataGateServer, LocalVpnComponent]] = []
     for server in servers:
         if server.id in used_server_ids:
             continue
         for component in components:
             if component.id in used_component_ids:
+                continue
+            if component.datagate_server_id is not None:
                 continue
             score, endpoint_match = score_pair(server, component)
             if score >= MATCH_THRESHOLD:
