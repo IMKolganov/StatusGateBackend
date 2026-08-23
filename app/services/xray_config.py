@@ -9,7 +9,7 @@ _VLESS_URI_PATTERN = re.compile(r"^vless://", re.IGNORECASE)
 
 
 def parse_xray_config_text(config_text: str) -> dict[str, Any]:
-    """Accept full Xray JSON or a vless:// share link (like .ovpn for OpenVPN)."""
+    """Accept full Xray JSON, DataGate client-link wrapper, or a vless:// share link."""
     stripped = (config_text or "").strip()
     if not stripped:
         raise ValueError("Xray config is empty")
@@ -17,19 +17,37 @@ def parse_xray_config_text(config_text: str) -> dict[str, Any]:
     # Pretty-printed JSON must be parsed as a whole — first-line extraction yields "{".
     if stripped.startswith("{"):
         try:
-            return json.loads(stripped)
+            parsed = json.loads(stripped)
         except json.JSONDecodeError:
-            # Fall through to line/URI handling for odd payloads.
-            pass
+            parsed = None
+        if isinstance(parsed, dict):
+            return _config_from_json_object(parsed)
 
     text = _extract_config_input(config_text)
     if text.startswith("{"):
-        return json.loads(text)
+        return _config_from_json_object(json.loads(text))
 
     if _VLESS_URI_PATTERN.match(text):
         return vless_uri_to_config(text)
 
     raise ValueError("Xray config must be JSON or a vless:// share link")
+
+
+def _config_from_json_object(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Normalize DataGate wrapper or full Xray JSON into a runnable config."""
+    # DataGate Monitor client-link download:
+    # {"vless": "vless://...", "dnsServers": [...], "uuid": "...", "endpoint": "..."}
+    vless = parsed.get("vless")
+    if isinstance(vless, str) and _VLESS_URI_PATTERN.match(vless.strip()):
+        return vless_uri_to_config(vless.strip())
+
+    if "inbounds" in parsed or "outbounds" in parsed:
+        return parsed
+
+    raise ValueError(
+        "Xray JSON must be a full config (inbounds/outbounds) "
+        "or a DataGate client-link object with a vless:// URI"
+    )
 
 
 def _extract_config_input(config_text: str) -> str:

@@ -290,6 +290,19 @@ class TestXrayConfigEdges:
         config = parse_xray_config_text(text)
         assert config["outbounds"][0]["protocol"] == "freedom"
 
+    def test_datagate_vless_wrapper(self) -> None:
+        text = (
+            '{\n  "vless": "vless://00000000-0000-4000-8000-000000000099@xs2.example.com:443'
+            '?encryption=none&security=tls&sni=xs2.example.com&type=tcp#Norway",\n'
+            '  "dnsServers": ["1.1.1.1"],\n'
+            '  "uuid": "00000000-0000-4000-8000-000000000099",\n'
+            '  "endpoint": "xs2.example.com:443"\n}\n'
+        )
+        config = parse_xray_config_text(text)
+        assert any(i.get("protocol") == "socks" for i in config["inbounds"])
+        assert config["outbounds"][0]["protocol"] == "vless"
+        assert config["outbounds"][0]["settings"]["vnext"][0]["address"] == "xs2.example.com"
+
 
 class TestGlobalExceptionDocsSkip:
     def test_docs_and_health_skip_envelope(self, client: TestClient) -> None:

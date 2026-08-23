@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -314,10 +315,32 @@ def _host_from_api_url(api_url: str | None) -> str | None:
 
 def parse_ovpn_endpoint(config_text: str) -> dict[str, Any]:
     """Extract proto / remote host / port from OpenVPN config or Xray share text."""
+    text = (config_text or "").strip()
+    # DataGate Xray client-link JSON: {"vless": "vless://...", "endpoint": "host:port"}
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except Exception:  # noqa: BLE001
+            payload = None
+        if isinstance(payload, dict):
+            vless = payload.get("vless")
+            if isinstance(vless, str) and vless.strip().lower().startswith("vless://"):
+                return parse_ovpn_endpoint(vless.strip())
+            endpoint = payload.get("endpoint")
+            if isinstance(endpoint, str) and endpoint.strip():
+                host_part, _, port_part = endpoint.strip().partition(":")
+                port_val: int | None = None
+                if port_part:
+                    try:
+                        port_val = int(port_part)
+                    except ValueError:
+                        port_val = None
+                return {"host": host_part or None, "port": port_val, "proto": None}
+
     host: str | None = None
     port: int | None = None
     proto: str | None = None
-    for raw_line in config_text.splitlines():
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or line.startswith(";"):
             continue
@@ -337,9 +360,9 @@ def parse_ovpn_endpoint(config_text: str) -> dict[str, Any]:
         elif key in ("address", "server") and len(parts) >= 2 and host is None:
             host = parts[1].split(":")[0]
     # vless://uuid@host:port?...
-    if host is None and "://" in config_text:
+    if host is None and "://" in text:
         try:
-            parsed = urlparse(config_text.strip().split()[0])
+            parsed = urlparse(text.split()[0])
             if parsed.hostname:
                 host = parsed.hostname
             if parsed.port:

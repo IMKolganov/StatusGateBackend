@@ -33,6 +33,19 @@ def test_parse_ovpn_endpoint():
     assert parse_ovpn_endpoint(text) == {"host": "vpn.example.com", "port": 443, "proto": "tcp"}
 
 
+def test_parse_ovpn_endpoint_from_datagate_xray_wrapper():
+    text = (
+        '{\n  "vless": "vless://00000000-0000-4000-8000-000000000099@xs2.datagateapp.com:443'
+        '?encryption=none&security=tls&type=tcp#x",\n'
+        '  "endpoint": "xs2.datagateapp.com:443"\n}'
+    )
+    assert parse_ovpn_endpoint(text) == {
+        "host": "xs2.datagateapp.com",
+        "port": 443,
+        "proto": None,
+    }
+
+
 def test_score_pair_matches_name_type_proto_and_host():
     server = DataGateServer(
         id=1,

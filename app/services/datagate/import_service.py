@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.probe_defaults import default_probe_url
+from app.models.component_group import ComponentGroup
 from app.models.component_kind import OPENVPN_COMPONENT_KIND_ID, XRAY_COMPONENT_KIND_ID
 from app.models.datagate_integration import DatagateIntegration
 from app.models.enums import ConnectionMode
@@ -37,6 +38,15 @@ from app.services.datagate.url_validation import validate_datagate_base_url
 def _slugify(value: str, fallback: str = "service") -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug[:100] or fallback
+
+
+# Map VPN server name → service group (create if missing).
+_COUNTRY_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("cyprus", "🇨🇾 Cyprus", "cyprus"),
+    ("helsinki", "🇫🇮 Helsinki", "helsinki"),
+    ("norway", "🇳🇴 Norway", "norway"),
+    ("poland", "🇵🇱 Poland", "poland"),
+)
 
 
 def _preferred_new_slug(server: DataGateServer) -> str:
@@ -204,6 +214,40 @@ class DatagateIntegrationService:
             datagate_common_name=component.datagate_common_name,
         )
 
+    def _groups_by_slug(self, project_id: UUID) -> dict[str, ComponentGroup]:
+        rows = self._session.scalars(
+            select(ComponentGroup).where(ComponentGroup.project_id == project_id)
+        ).all()
+        return {g.slug: g for g in rows}
+
+    def _ensure_group_for_name(
+        self,
+        project_id: UUID,
+        server_name: str,
+        groups_by_slug: dict[str, ComponentGroup],
+    ) -> UUID | None:
+        """Assign Cyprus/Helsinki/Norway/Poland groups from the server display name."""
+        haystack = server_name.lower()
+        for needle, display_name, slug in _COUNTRY_GROUPS:
+            if needle not in haystack:
+                continue
+            group = groups_by_slug.get(slug)
+            if group is None:
+                max_sort = max((g.sort_order for g in groups_by_slug.values()), default=0)
+                group = ComponentGroup(
+                    project_id=project_id,
+                    name=display_name,
+                    slug=slug,
+                    description=None,
+                    sort_order=max_sort + 10,
+                    is_active=True,
+                )
+                self._session.add(group)
+                self._session.flush()
+                groups_by_slug[slug] = group
+            return group.id
+        return None
+
     def preview(self, project_id: UUID) -> DatagatePreviewResponse:
         integration = self.require_integration(project_id)
         client = self._client(integration)
@@ -303,6 +347,7 @@ class DatagateIntegrationService:
         items: list[DatagateImportItemResult] = []
         created = updated = skipped = errors = 0
         reserved_slugs = {c.slug for c in components}
+        groups_by_slug = self._groups_by_slug(project_id)
 
         for match in matched:
             component = by_id.get(match.component.id)
@@ -325,6 +370,13 @@ class DatagateIntegrationService:
                     component.name = match.server.server_name
                     action_parts.append("synced_name")
                 component.datagate_server_id = match.server.id
+                if component.group_id is None:
+                    group_id = self._ensure_group_for_name(
+                        project_id, match.server.server_name, groups_by_slug
+                    )
+                    if group_id is not None:
+                        component.group_id = group_id
+                        action_parts.append("assigned_group")
                 if config_text is not None:
                     component.check_config = {"config_text": config_text}
                     component.datagate_common_name = cn
@@ -374,9 +426,11 @@ class DatagateIntegrationService:
                     max_sort += 10
                     kind_id = XRAY_COMPONENT_KIND_ID if server.check_type == "xray" else OPENVPN_COMPONENT_KIND_ID
                     slug = self._unique_slug(project_id, _preferred_new_slug(server), reserved=reserved_slugs)
+                    group_id = self._ensure_group_for_name(project_id, server.server_name, groups_by_slug)
                     component = MonitoredComponent(
                         project_id=project_id,
                         component_kind_id=kind_id,
+                        group_id=group_id,
                         name=server.server_name,
                         slug=slug,
                         check_url=default_probe_url(),
