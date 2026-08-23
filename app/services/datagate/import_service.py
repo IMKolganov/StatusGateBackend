@@ -29,6 +29,8 @@ from app.schemas.datagate import (
 )
 from app.services.datagate.client import DataGateApiError, DataGateClient, DataGateServer
 from app.services.datagate.matcher import LocalVpnComponent, match_servers, monitor_common_name
+from app.services.datagate.secrets import decrypt_client_secret, encrypt_client_secret
+from app.services.datagate.url_validation import validate_datagate_base_url
 
 
 def _slugify(value: str, fallback: str = "service") -> str:
@@ -65,7 +67,10 @@ class DatagateIntegrationService:
     def upsert(self, project_id: UUID, payload: DatagateIntegrationUpsert) -> DatagateIntegration:
         self._get_project(project_id)
         integration = self._session.get(DatagateIntegration, project_id)
-        base_url = payload.base_url.rstrip("/")
+        try:
+            base_url = validate_datagate_base_url(payload.base_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         if integration is None:
             if not payload.client_secret:
                 raise HTTPException(
@@ -76,7 +81,7 @@ class DatagateIntegrationService:
                 project_id=project_id,
                 base_url=base_url,
                 client_id=payload.client_id,
-                client_secret=payload.client_secret,
+                client_secret=encrypt_client_secret(payload.client_secret),
                 monitor_cn_prefix=payload.monitor_cn_prefix,
                 is_enabled=payload.is_enabled,
             )
@@ -87,7 +92,7 @@ class DatagateIntegrationService:
             integration.monitor_cn_prefix = payload.monitor_cn_prefix
             integration.is_enabled = payload.is_enabled
             if payload.client_secret:
-                integration.client_secret = payload.client_secret
+                integration.client_secret = encrypt_client_secret(payload.client_secret)
         self._session.commit()
         self._session.refresh(integration)
         return integration
@@ -102,10 +107,17 @@ class DatagateIntegrationService:
         return integration
 
     def _client(self, integration: DatagateIntegration) -> DataGateClient:
+        try:
+            secret = decrypt_client_secret(integration.client_secret)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(exc),
+            ) from exc
         return DataGateClient(
             base_url=integration.base_url,
             client_id=integration.client_id,
-            client_secret=integration.client_secret,
+            client_secret=secret,
         )
 
     def test_connection(self, project_id: UUID) -> DatagateTestResponse:
@@ -261,10 +273,10 @@ class DatagateIntegrationService:
 
         components = self._vpn_components(project_id)
         locals_ = [self._to_local(c) for c in components]
-        buckets = match_servers(servers if payload.server_ids is None else all_servers, locals_)
-        # Restrict match buckets to selected servers
-        matched = [m for m in buckets.matched if m.server.id in selected_ids]
-        new_servers = [s for s in buckets.new_servers if s.id in selected_ids]
+        # Match only selected servers so unselected DG servers cannot steal local components.
+        buckets = match_servers(servers, locals_)
+        matched = buckets.matched
+        new_servers = buckets.new_servers
 
         by_id = {c.id: c for c in components}
         external_id = f"statusgate:{project_id}"
@@ -276,12 +288,9 @@ class DatagateIntegrationService:
             if component is None:
                 continue
             try:
-                action_parts: list[str] = []
-                if payload.sync_names and match.name_differs:
-                    component.name = match.server.server_name
-                    action_parts.append("synced_name")
-                component.datagate_server_id = match.server.id
                 cn = monitor_common_name(integration.monitor_cn_prefix, project.slug, match.server.id)
+                config_text: str | None = None
+                # Fetch config before mutating ORM state so failures leave the row unchanged.
                 if payload.refresh_configs:
                     config_text = client.ensure_config_text(
                         vpn_server_id=match.server.id,
@@ -289,6 +298,13 @@ class DatagateIntegrationService:
                         external_id=external_id,
                         xray=match.server.check_type == "xray",
                     )
+
+                action_parts: list[str] = []
+                if payload.sync_names and match.name_differs:
+                    component.name = match.server.server_name
+                    action_parts.append("synced_name")
+                component.datagate_server_id = match.server.id
+                if config_text is not None:
                     component.check_config = {"config_text": config_text}
                     component.datagate_common_name = cn
                     if match.server.check_type == "openvpn":
@@ -311,6 +327,7 @@ class DatagateIntegrationService:
                     )
                 )
             except DataGateApiError as exc:
+                self._session.refresh(component)
                 errors += 1
                 items.append(
                     DatagateImportItemResult(

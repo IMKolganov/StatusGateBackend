@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.services.datagate.url_validation import validate_datagate_base_url
 
 
 class DatagateIntegrationUpsert(BaseModel):
@@ -12,6 +14,11 @@ class DatagateIntegrationUpsert(BaseModel):
     client_secret: str | None = Field(default=None, min_length=1)
     monitor_cn_prefix: str = Field(default="statusgate", min_length=1, max_length=100)
     is_enabled: bool = True
+
+    @field_validator("base_url")
+    @classmethod
+    def check_base_url(cls, value: str) -> str:
+        return validate_datagate_base_url(value)
 
 
 class DatagateIntegrationResponse(BaseModel):

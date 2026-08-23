@@ -6,8 +6,9 @@ import base64
 from uuid import uuid4
 
 import httpx
+import pytest
 
-from app.services.datagate.client import DataGateClient, DataGateServer, parse_ovpn_endpoint
+from app.services.datagate.client import DataGateApiError, DataGateClient, DataGateServer, parse_ovpn_endpoint
 from app.services.datagate.matcher import (
     LocalVpnComponent,
     match_servers,
@@ -15,6 +16,7 @@ from app.services.datagate.matcher import (
     normalize_name,
     score_pair,
 )
+from app.services.datagate.url_validation import validate_datagate_base_url
 
 
 def test_normalize_name_strips_emoji_and_tokens():
@@ -179,3 +181,124 @@ def test_datagate_client_download_decodes_base64():
     client = DataGateClient("https://api.example.com", "c", "s", transport=httpx.MockTransport(handler))
     text = client.download_by_cn(vpn_server_id=1, common_name="statusgate-demo-1", xray=False)
     assert "proto tcp" in text
+
+
+def test_ensure_config_text_does_not_issue_on_server_error():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/auth/token":
+            return httpx.Response(
+                200,
+                json={"success": True, "message": "ok", "data": {"token": "t", "expiration": "2099-01-01T00:00:00Z"}},
+            )
+        if request.url.path.endswith("/download-file-by-cn"):
+            return httpx.Response(503, json={"success": False, "message": "unavailable"})
+        return httpx.Response(200, json={"success": True, "message": "ok", "data": {}})
+
+    client = DataGateClient("https://api.example.com", "c", "s", transport=httpx.MockTransport(handler))
+    with pytest.raises(DataGateApiError, match="unavailable"):
+        client.ensure_config_text(
+            vpn_server_id=1,
+            common_name="statusgate-demo-1",
+            external_id="statusgate:x",
+            xray=False,
+        )
+    assert not any(path.endswith("/add") for path in calls)
+
+
+def test_ensure_config_text_issues_after_not_found():
+    issued = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth/token":
+            return httpx.Response(
+                200,
+                json={"success": True, "message": "ok", "data": {"token": "t", "expiration": "2099-01-01T00:00:00Z"}},
+            )
+        if request.url.path.endswith("/download-file-by-cn"):
+            if issued["count"] == 0:
+                return httpx.Response(404, json={"success": False, "message": "missing"})
+            payload = b"client\nproto udp\n"
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "message": "ok",
+                    "data": {"content": base64.b64encode(payload).decode("ascii"), "fileSizeBytes": len(payload)},
+                },
+            )
+        if request.url.path.endswith("/get-all/1"):
+            return httpx.Response(200, json={"success": True, "message": "ok", "data": {"issuedOvpnFiles": []}})
+        if request.url.path.endswith("/add"):
+            issued["count"] += 1
+            return httpx.Response(
+                200,
+                json={"success": True, "message": "ok", "data": {"issuedOvpnFile": {"id": 99, "commonName": "cn-1"}}},
+            )
+        if request.url.path.endswith("/download-file"):
+            payload = b"client\nproto udp\n"
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "message": "ok",
+                    "data": {"content": base64.b64encode(payload).decode("ascii"), "fileSizeBytes": len(payload)},
+                },
+            )
+        return httpx.Response(404, json={"success": False, "message": "nope"})
+
+    client = DataGateClient("https://api.example.com", "c", "s", transport=httpx.MockTransport(handler))
+    text = client.ensure_config_text(
+        vpn_server_id=1,
+        common_name="cn-1",
+        external_id="statusgate:x",
+        xray=False,
+    )
+    assert "proto udp" in text
+    assert issued["count"] == 1
+
+
+def test_validate_datagate_base_url_allowlist():
+    assert validate_datagate_base_url("https://api.datagateapp.com/") == "https://api.datagateapp.com"
+    assert validate_datagate_base_url("http://localhost:5581") == "http://localhost:5581"
+    with pytest.raises(ValueError, match="not allowed"):
+        validate_datagate_base_url("https://evil.example")
+    with pytest.raises(ValueError, match="https"):
+        validate_datagate_base_url("http://api.datagateapp.com")
+
+
+def test_encrypt_decrypt_client_secret_roundtrip():
+    from app.services.datagate.secrets import decrypt_client_secret, encrypt_client_secret, is_encrypted_secret
+
+    stored = encrypt_client_secret("raw-secret")
+    assert is_encrypted_secret(stored)
+    assert "raw-secret" not in stored
+    assert decrypt_client_secret(stored) == "raw-secret"
+    # Legacy plaintext rows still work.
+    assert decrypt_client_secret("legacy-plain") == "legacy-plain"
+
+
+def test_match_servers_partial_selection_does_not_steal_component():
+    """Unselected competing servers must not consume the local match candidate."""
+    selected = DataGateServer(
+        id=2,
+        server_type=0,
+        server_name="Helsinki 1",
+        host="hel.example.com",
+        port=443,
+        proto="tcp",
+    )
+    # If both were matched together, id=1 could win first and steal the component.
+    component = LocalVpnComponent(
+        id=uuid4(),
+        name="Helsinki 1 openvpn tcp",
+        slug="helsinki-1",
+        check_type="openvpn",
+        config_text="proto tcp\nremote hel.example.com 443\n",
+    )
+    buckets = match_servers([selected], [component])
+    assert len(buckets.matched) == 1
+    assert buckets.matched[0].server.id == 2
+    assert buckets.new_servers == []

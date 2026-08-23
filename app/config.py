@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
 
+    # Comma-separated host allowlist for DataGate Monitor base_url (SSRF / credential exfil guard).
+    datagate_allowed_hosts: str = "api.datagateapp.com,localhost,127.0.0.1"
+    # Optional Fernet material for encrypting DataGate client_secret at rest.
+    # If empty, a key is derived from JWT_SECRET (rotate both together if changed).
+    datagate_credentials_key: str = ""
+
     totp_issuer: str = "StatusGate"
 
     @field_validator("jwt_secret")

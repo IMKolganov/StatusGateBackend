@@ -65,7 +65,12 @@ class DataGateClient:
         self._token: _TokenState | None = None
 
     def _client(self) -> httpx.Client:
-        return httpx.Client(base_url=self.base_url, timeout=self._timeout, transport=self._transport)
+        return httpx.Client(
+            base_url=self.base_url,
+            timeout=self._timeout,
+            transport=self._transport,
+            follow_redirects=False,
+        )
 
     def _unwrap(self, payload: Any) -> Any:
         if not isinstance(payload, dict):
@@ -263,7 +268,10 @@ class DataGateClient:
         """Download existing CN config or issue a new one then download."""
         try:
             return self.download_by_cn(vpn_server_id=vpn_server_id, common_name=common_name, xray=xray)
-        except DataGateApiError:
+        except DataGateApiError as exc:
+            # Only treat not-found style failures as "issue a new CN".
+            if exc.status_code not in (404, 400):
+                raise
             logger.info("CN %s missing on server %s — issuing", common_name, vpn_server_id)
 
         files = self.list_issued_files(vpn_server_id, xray=xray)
