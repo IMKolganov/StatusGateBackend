@@ -15,6 +15,7 @@ from app.schemas.datagate import DatagateImportRequest
 from app.services.datagate.client import DataGateApiError, DataGateServer
 from app.services.datagate.import_service import DatagateIntegrationService
 from app.services.datagate.secrets import decrypt_client_secret, encrypt_client_secret, is_encrypted_secret
+from app.core.probe_defaults import default_probe_url
 
 
 def _data(response):
@@ -319,3 +320,5 @@ class TestDatagateImportService:
         assert created.check_type == "openvpn"
         assert created.connection_mode == "persistent"
         assert created.datagate_common_name == "statusgate-dg3-42"
+        assert created.check_url == default_probe_url()
+        assert created.check_url != "https://cy.example.com:9443/"

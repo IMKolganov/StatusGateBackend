@@ -10,6 +10,18 @@ _VLESS_URI_PATTERN = re.compile(r"^vless://", re.IGNORECASE)
 
 def parse_xray_config_text(config_text: str) -> dict[str, Any]:
     """Accept full Xray JSON or a vless:// share link (like .ovpn for OpenVPN)."""
+    stripped = (config_text or "").strip()
+    if not stripped:
+        raise ValueError("Xray config is empty")
+
+    # Pretty-printed JSON must be parsed as a whole — first-line extraction yields "{".
+    if stripped.startswith("{"):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            # Fall through to line/URI handling for odd payloads.
+            pass
+
     text = _extract_config_input(config_text)
     if text.startswith("{"):
         return json.loads(text)

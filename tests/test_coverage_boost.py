@@ -285,6 +285,11 @@ class TestXrayConfigEdges:
         with pytest.raises(ValueError):
             parse_xray_config_text("[1,2,3]")
 
+    def test_pretty_printed_json_config(self) -> None:
+        text = '{\n  "inbounds": [],\n  "outbounds": [{"protocol": "freedom"}]\n}\n'
+        config = parse_xray_config_text(text)
+        assert config["outbounds"][0]["protocol"] == "freedom"
+
 
 class TestGlobalExceptionDocsSkip:
     def test_docs_and_health_skip_envelope(self, client: TestClient) -> None:

@@ -330,8 +330,8 @@ class DatagateIntegrationService:
                     component.datagate_common_name = cn
                     if match.server.check_type == "openvpn":
                         component.connection_mode = ConnectionMode.PERSISTENT.value
-                    if match.server.api_url:
-                        component.check_url = match.server.api_url
+                    # Probe through the tunnel — never the management apiUrl (often unreachable via VPN).
+                    component.check_url = default_probe_url()
                     action_parts.append("refreshed_config")
                 elif not component.datagate_common_name:
                     component.datagate_common_name = cn
@@ -379,7 +379,7 @@ class DatagateIntegrationService:
                         component_kind_id=kind_id,
                         name=server.server_name,
                         slug=slug,
-                        check_url=(server.api_url or "").strip() or default_probe_url(),
+                        check_url=default_probe_url(),
                         check_method="GET",
                         check_type=server.check_type,
                         check_config={"config_text": config_text},
