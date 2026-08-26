@@ -322,3 +322,56 @@ class TestDatagateImportService:
         assert created.datagate_common_name == "statusgate-dg3-42"
         assert created.check_url == default_probe_url()
         assert created.check_url != "https://cy.example.com:9443/"
+
+    def test_import_deactivates_removed_datagate_server(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-removed", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        orphan = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Old Norway udp",
+            slug="old-norway-udp",
+            check_url="https://ifconfig.me/ip",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote old.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            datagate_server_id=999,
+            datagate_common_name="statusgate-dg-removed-999",
+            is_active=True,
+        )
+        db_session.add(orphan)
+        db_session.commit()
+
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = [
+            DataGateServer(id=1, server_type=0, server_name="Cyprus", host="cy.example.com", proto="udp"),
+        ]
+        mock_client.enrich_server.side_effect = lambda s: s
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        result = service.import_servers(
+            project.id,
+            DatagateImportRequest(
+                sync_names=False,
+                refresh_configs=False,
+                import_new=False,
+                deactivate_removed=True,
+                server_ids=[1],
+            ),
+        )
+        assert result.deactivated == 1
+        db_session.refresh(orphan)
+        assert orphan.is_active is False
+        assert orphan.datagate_server_id == 999

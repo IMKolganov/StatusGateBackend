@@ -78,6 +78,7 @@ class DatagatePreviewResponse(BaseModel):
     matched: list[DatagateMatchedPair]
     new_servers: list[DatagateServerSummary]
     unmatched_local: list[DatagateLocalComponentSummary]
+    removed_local: list[DatagateLocalComponentSummary] = Field(default_factory=list)
     sync_names_question: str | None = None
 
 
@@ -85,6 +86,8 @@ class DatagateImportRequest(BaseModel):
     sync_names: bool = True
     refresh_configs: bool = True
     import_new: bool = True
+    deactivate_removed: bool = False
+    delete_removed: bool = False
     server_ids: list[int] | None = None
 
 
@@ -101,4 +104,6 @@ class DatagateImportResponse(BaseModel):
     created: int = 0
     updated: int = 0
     skipped: int = 0
+    deactivated: int = 0
+    deleted: int = 0
     errors: int = 0

@@ -220,6 +220,18 @@ class DatagateIntegrationService:
         ).all()
         return {g.slug: g for g in rows}
 
+    def _removed_from_datagate(
+        self,
+        components: list[MonitoredComponent],
+        remote_server_ids: set[int],
+    ) -> list[MonitoredComponent]:
+        """VPN services linked to a DataGate server id that no longer exists in Monitor."""
+        return [
+            c
+            for c in components
+            if c.datagate_server_id is not None and c.datagate_server_id not in remote_server_ids
+        ]
+
     def _ensure_group_for_name(
         self,
         project_id: UUID,
@@ -252,12 +264,15 @@ class DatagateIntegrationService:
         integration = self.require_integration(project_id)
         client = self._client(integration)
         try:
-            servers = [client.enrich_server(s) for s in client.list_servers() if not s.is_disabled]
+            all_remote = client.list_servers()
+            servers = [client.enrich_server(s) for s in all_remote if not s.is_disabled]
         except DataGateApiError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-        locals_ = [self._to_local(c) for c in self._vpn_components(project_id)]
+        components = self._vpn_components(project_id)
+        locals_ = [self._to_local(c) for c in components]
         buckets = match_servers(servers, locals_)
+        removed = self._removed_from_datagate(components, {s.id for s in all_remote})
 
         name_diffs = [m for m in buckets.matched if m.name_differs]
         sync_question = None
@@ -294,6 +309,7 @@ class DatagateIntegrationService:
             ],
             new_servers=[self._server_summary(s) for s in buckets.new_servers],
             unmatched_local=[self._local_summary(c) for c in buckets.unmatched_local],
+            removed_local=[self._local_summary(self._to_local(c)) for c in removed],
             sync_names_question=sync_question,
         )
 
@@ -496,11 +512,54 @@ class DatagateIntegrationService:
                     )
                 )
 
+        deactivated = deleted = 0
+        if payload.deactivate_removed or payload.delete_removed:
+            try:
+                remote_ids = {s.id for s in client.list_servers()}
+            except DataGateApiError as exc:
+                errors += 1
+                items.append(
+                    DatagateImportItemResult(
+                        server_id=0,
+                        server_name="(removed sync)",
+                        action="error",
+                        message=str(exc),
+                    )
+                )
+            else:
+                for component in self._removed_from_datagate(components, remote_ids):
+                    dg_id = component.datagate_server_id or 0
+                    if payload.delete_removed:
+                        self._session.delete(component)
+                        deleted += 1
+                        items.append(
+                            DatagateImportItemResult(
+                                server_id=dg_id,
+                                server_name=component.name,
+                                action="deleted_removed",
+                                component_id=component.id,
+                            )
+                        )
+                    elif payload.deactivate_removed and component.is_active:
+                        component.is_active = False
+                        self._session.add(component)
+                        deactivated += 1
+                        items.append(
+                            DatagateImportItemResult(
+                                server_id=dg_id,
+                                server_name=component.name,
+                                action="deactivated_removed",
+                                component_id=component.id,
+                            )
+                        )
+
         self._session.commit()
         return DatagateImportResponse(
             items=items,
             created=created,
             updated=updated,
             skipped=skipped,
+            deactivated=deactivated,
+            deleted=deleted,
             errors=errors,
         )
