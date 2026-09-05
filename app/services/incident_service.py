@@ -6,6 +6,10 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.cqrs.commands.incidents import IncidentCommandHandler, IncidentUpdateCommandHandler
+from app.cqrs.queries.incidents import IncidentQueryHandler, IncidentUpdateQueryHandler
+from app.cqrs.queries.monitored_components import MonitoredComponentQueryHandler
+from app.cqrs.queries.projects import ProjectQueryHandler
 from app.models.incident import Incident
 from app.models.incident_update import IncidentUpdate
 from app.models.monitored_component import MonitoredComponent
@@ -27,9 +31,15 @@ class IncidentService:
     def __init__(self, session: Session, *, display_tz: ZoneInfo | None = None) -> None:
         self._session = session
         self._display_tz = display_tz or ZoneInfo("UTC")
+        self._projects = ProjectQueryHandler(session)
+        self._components = MonitoredComponentQueryHandler(session)
+        self._incident_queries = IncidentQueryHandler(session)
+        self._incident_commands = IncidentCommandHandler(session, auto_commit=False)
+        self._update_queries = IncidentUpdateQueryHandler(session)
+        self._update_commands = IncidentUpdateCommandHandler(session, auto_commit=False)
 
     def _get_project(self, project_id: UUID) -> Project:
-        project = self._session.get(Project, project_id)
+        project = self._projects.get_by_id(project_id)
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         return project
@@ -41,14 +51,7 @@ class IncidentService:
         return project
 
     def _get_incident(self, incident_id: UUID) -> Incident:
-        incident = self._session.scalar(
-            select(Incident)
-            .options(
-                selectinload(Incident.updates),
-                selectinload(Incident.monitored_component),
-            )
-            .where(Incident.id == incident_id)
-        )
+        incident = self._incident_queries.get_by_id_with_relations(incident_id)
         if incident is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
         return incident
@@ -56,7 +59,7 @@ class IncidentService:
     def _resolve_component(self, project_id: UUID, component_id: UUID | None) -> MonitoredComponent | None:
         if component_id is None:
             return None
-        component = self._session.get(MonitoredComponent, component_id)
+        component = self._components.get_by_id(component_id)
         if component is None or component.project_id != project_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -66,15 +69,7 @@ class IncidentService:
 
     def list_for_project(self, project_id: UUID) -> list[IncidentResponse]:
         self._get_project(project_id)
-        incidents = self._session.scalars(
-            select(Incident)
-            .options(
-                selectinload(Incident.updates),
-                selectinload(Incident.monitored_component),
-            )
-            .where(Incident.project_id == project_id)
-            .order_by(Incident.created_at.desc())
-        ).all()
+        incidents = self._incident_queries.list_by_project(project_id)
         return [self._to_incident_response(incident) for incident in incidents]
 
     def create(self, project_id: UUID, payload: IncidentCreate) -> IncidentResponse:
@@ -98,8 +93,7 @@ class IncidentService:
         incident.updates.append(
             IncidentUpdate(message=payload.message, status=payload.status, posted_at=posted_at)
         )
-        self._session.add(incident)
-        self._session.commit()
+        self._incident_commands.create(incident, commit=True)
         return self._to_incident_response(self._get_incident(incident.id))
 
     def update_incident(self, incident_id: UUID, payload: IncidentUpdatePayload) -> IncidentResponse:
@@ -123,13 +117,12 @@ class IncidentService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="ends_at must be greater than or equal to starts_at",
             )
-        self._session.commit()
+        self._incident_commands.update(incident, commit=True)
         return self._to_incident_response(self._get_incident(incident_id))
 
     def delete_incident(self, incident_id: UUID) -> None:
         incident = self._get_incident(incident_id)
-        self._session.delete(incident)
-        self._session.commit()
+        self._incident_commands.delete(incident, commit=True)
 
     def add_update(self, incident_id: UUID, payload: IncidentUpdateCreate) -> IncidentUpdateResponse:
         incident = self._get_incident(incident_id)
@@ -140,28 +133,24 @@ class IncidentService:
             status=payload.status,
             posted_at=posted_at,
         )
-        self._session.add(update)
-        self._session.commit()
-        self._session.refresh(update)
+        self._update_commands.create(update, commit=True)
         return IncidentUpdateResponse.model_validate(update)
 
     def update_entry(self, update_id: UUID, payload: IncidentUpdateUpdate) -> IncidentUpdateResponse:
-        update = self._session.get(IncidentUpdate, update_id)
+        update = self._update_queries.get_by_id(update_id)
         if update is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident update not found")
         data = payload.model_dump(exclude_unset=True)
         for key, value in data.items():
             setattr(update, key, value)
-        self._session.commit()
-        self._session.refresh(update)
+        self._update_commands.update(update, commit=True)
         return IncidentUpdateResponse.model_validate(update)
 
     def delete_update(self, update_id: UUID) -> None:
-        update = self._session.get(IncidentUpdate, update_id)
+        update = self._update_queries.get_by_id(update_id)
         if update is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident update not found")
-        self._session.delete(update)
-        self._session.commit()
+        self._update_commands.delete(update, commit=True)
 
     def get_public_history(self, slug: str, *, limit: int = 200) -> PublicProjectHistory:
         project = self._get_project_by_slug(slug)

@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.access_role import AccessRole
@@ -25,10 +25,18 @@ class AccountRepository(Repository[Account, UUID]):
         return self.session.scalar(stmt)
 
     def count_all(self) -> int:
-        from sqlalchemy import func
-
         stmt = select(func.count()).select_from(Account)
         return self.session.scalar(stmt) or 0
+
+    def list_with_roles(self, *, offset: int = 0, limit: int = 100) -> list[Account]:
+        stmt = (
+            select(Account)
+            .options(selectinload(Account.access_roles))
+            .order_by(Account.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
 
     def assign_access_role(self, account: Account, access_role: AccessRole) -> Account:
         if access_role not in account.access_roles:

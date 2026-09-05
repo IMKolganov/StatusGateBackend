@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.services.datagate.url_validation import validate_datagate_base_url
 
@@ -14,6 +14,10 @@ class DatagateIntegrationUpsert(BaseModel):
     client_secret: str | None = Field(default=None, min_length=1)
     monitor_cn_prefix: str = Field(default="statusgate", min_length=1, max_length=100)
     is_enabled: bool = True
+    auto_sync_enabled: bool = False
+    auto_sync_interval_hours: int = Field(default=24, ge=1, le=168)
+    auto_sync_import_new: bool = False
+    auto_sync_deactivate_removed: bool = False
 
     @field_validator("base_url")
     @classmethod
@@ -30,6 +34,14 @@ class DatagateIntegrationResponse(BaseModel):
     client_secret_set: bool
     monitor_cn_prefix: str
     is_enabled: bool
+    auto_sync_enabled: bool = False
+    auto_sync_interval_hours: int = 24
+    auto_sync_import_new: bool = False
+    auto_sync_deactivate_removed: bool = False
+    last_synced_at: datetime | None = None
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+    last_sync_batch_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -78,6 +90,7 @@ class DatagatePreviewResponse(BaseModel):
     matched: list[DatagateMatchedPair]
     new_servers: list[DatagateServerSummary]
     unmatched_local: list[DatagateLocalComponentSummary]
+    removed_local: list[DatagateLocalComponentSummary] = Field(default_factory=list)
     sync_names_question: str | None = None
 
 
@@ -85,7 +98,15 @@ class DatagateImportRequest(BaseModel):
     sync_names: bool = True
     refresh_configs: bool = True
     import_new: bool = True
+    deactivate_removed: bool = False
+    delete_removed: bool = False
     server_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def delete_wins_over_deactivate(self) -> DatagateImportRequest:
+        if self.delete_removed and self.deactivate_removed:
+            self.deactivate_removed = False
+        return self
 
 
 class DatagateImportItemResult(BaseModel):
@@ -102,3 +123,6 @@ class DatagateImportResponse(BaseModel):
     updated: int = 0
     skipped: int = 0
     errors: int = 0
+    deactivated: int = 0
+    deleted: int = 0
+    batch_id: UUID | None = None

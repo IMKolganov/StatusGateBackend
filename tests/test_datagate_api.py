@@ -319,3 +319,303 @@ class TestDatagateImportService:
         assert created.check_type == "openvpn"
         assert created.connection_mode == "persistent"
         assert created.datagate_common_name == "statusgate-dg3-42"
+
+    def test_preview_removed_local_excludes_never_linked_and_active_links(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-preview", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        kept = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Cyprus",
+            slug="cyprus",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote cy.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            datagate_server_id=1,
+        )
+        removed = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Helsinki 2",
+            slug="helsinki-2",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote old.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            datagate_server_id=87,
+        )
+        never_linked = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Manual VPN",
+            slug="manual-vpn",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote manual.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+        )
+        db_session.add_all([kept, removed, never_linked])
+        db_session.commit()
+
+        live = DataGateServer(
+            id=1,
+            server_type=0,
+            server_name="Cyprus",
+            host="cy.example.com",
+            port=1194,
+            proto="udp",
+        )
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = [live]
+        mock_client.enrich_server.side_effect = lambda s: s
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        preview = service.preview(project.id)
+        assert [c.slug for c in preview.removed_local] == ["helsinki-2"]
+        assert {c.slug for c in preview.unmatched_local} == {"manual-vpn"}
+        assert len(preview.matched) == 1
+
+    def test_deactivate_removed_keeps_history(self, db_session: Session) -> None:
+        from app.models.check_result import CheckResult
+
+        project = Project(name="DataGate", slug="dg-deact", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        local = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Helsinki 2",
+            slug="helsinki-2",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote old.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            is_active=True,
+            datagate_server_id=87,
+            datagate_common_name="statusgate-dg-deact-87",
+        )
+        db_session.add(local)
+        db_session.flush()
+        history = CheckResult(
+            monitored_component_id=local.id,
+            outcome="up",
+            latency_ms=12,
+        )
+        db_session.add(history)
+        db_session.commit()
+        history_id = history.id
+
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = []
+        mock_client.enrich_server.side_effect = lambda s: s
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        result = service.import_servers(
+            project.id,
+            DatagateImportRequest(
+                sync_names=False,
+                refresh_configs=False,
+                import_new=False,
+                deactivate_removed=True,
+                server_ids=[],
+            ),
+        )
+        assert result.deactivated == 1
+        assert result.deleted == 0
+        db_session.refresh(local)
+        assert local.is_active is False
+        assert local.datagate_server_id == 87
+        assert db_session.get(CheckResult, history_id) is not None
+
+    def test_delete_removed_cascades_history(self, db_session: Session) -> None:
+        from app.models.check_result import CheckResult
+
+        project = Project(name="DataGate", slug="dg-del", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        local = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Poland 1",
+            slug="poland-1",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote pl.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            datagate_server_id=90,
+        )
+        db_session.add(local)
+        db_session.flush()
+        history = CheckResult(
+            monitored_component_id=local.id,
+            outcome="up",
+            latency_ms=9,
+        )
+        db_session.add(history)
+        db_session.commit()
+        component_id = local.id
+        history_id = history.id
+
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = []
+        mock_client.enrich_server.side_effect = lambda s: s
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        result = service.import_servers(
+            project.id,
+            DatagateImportRequest(
+                sync_names=False,
+                refresh_configs=False,
+                import_new=False,
+                deactivate_removed=True,
+                delete_removed=True,
+                server_ids=[],
+            ),
+        )
+        assert result.deleted == 1
+        assert result.deactivated == 0
+        assert db_session.get(MonitoredComponent, component_id) is None
+        assert db_session.get(CheckResult, history_id) is None
+
+    def test_partial_import_does_not_treat_unselected_link_as_removed(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-partial-rm", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        local = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Norway 1",
+            slug="norway-1",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote n1.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            is_active=True,
+            datagate_server_id=75,
+        )
+        db_session.add(local)
+        db_session.commit()
+
+        linked = DataGateServer(
+            id=75,
+            server_type=0,
+            server_name="Norway 1",
+            host="n1.example.com",
+            port=1194,
+            proto="udp",
+        )
+        other = DataGateServer(
+            id=94,
+            server_type=0,
+            server_name="Norway 2",
+            host="n2.example.com",
+            port=1194,
+            proto="udp",
+        )
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = [linked, other]
+        mock_client.enrich_server.side_effect = lambda s: s
+        mock_client.ensure_config_text.return_value = "client\nproto udp\n"
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        result = service.import_servers(
+            project.id,
+            DatagateImportRequest(
+                sync_names=False,
+                refresh_configs=False,
+                import_new=False,
+                deactivate_removed=True,
+                server_ids=[94],
+            ),
+        )
+        assert result.deactivated == 0
+        assert result.deleted == 0
+        db_session.refresh(local)
+        assert local.is_active is True
+        assert local.datagate_server_id == 75
+
+
+class TestDatagateRemovedAuth:
+    def test_operator_cannot_delete_removed(self, client: TestClient, admin_headers: dict) -> None:
+        created = _data(
+            client.post(
+                "/api/auth/register",
+                json={"email": "dg-operator@example.com", "password": "password123"},
+            )
+        )
+        patched = client.put(
+            f"/api/admin/accounts/{created['id']}/roles",
+            json={"access_roles": ["operator"]},
+        )
+        assert patched.status_code == 200, patched.text
+
+        client.cookies.clear()
+        login = client.post(
+            "/api/auth/login",
+            json={"email": "dg-operator@example.com", "password": "password123"},
+        )
+        assert login.status_code == 200, login.text
+
+        project = _create_project(client, slug="dg-op-del")
+        response = client.post(
+            f"/api/admin/projects/{project['id']}/datagate/import",
+            json={
+                "sync_names": False,
+                "refresh_configs": False,
+                "import_new": False,
+                "delete_removed": True,
+                "server_ids": [],
+            },
+        )
+        assert response.status_code == 403
+        body = response.json()
+        assert body["success"] is False
+        assert "admin" in body["message"].lower()

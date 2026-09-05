@@ -8,5 +8,5 @@ from app.repositories.monitored_component import MonitoredComponentRepository
 
 
 class MonitoredComponentCommandHandler(BaseCommandHandler[MonitoredComponent, UUID, MonitoredComponentRepository]):
-    def __init__(self, session: Session) -> None:
-        super().__init__(session, MonitoredComponentRepository(session))
+    def __init__(self, session: Session, *, auto_commit: bool = True) -> None:
+        super().__init__(session, MonitoredComponentRepository(session), auto_commit=auto_commit)

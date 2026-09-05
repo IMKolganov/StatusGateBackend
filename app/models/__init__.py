@@ -8,6 +8,7 @@ from app.models.connection_event import ConnectionEvent
 from app.models.component_group import ComponentGroup
 from app.models.component_kind import ComponentKind
 from app.models.datagate_integration import DatagateIntegration
+from app.models.entity_change_log import EntityChangeLog
 from app.models.monitored_component import MonitoredComponent
 from app.models.incident import Incident
 from app.models.incident_update import IncidentUpdate
@@ -27,6 +28,7 @@ __all__ = [
     "ComponentGroup",
     "ComponentKind",
     "DatagateIntegration",
+    "EntityChangeLog",
     "Incident",
     "IncidentUpdate",
     "MonitoringSettings",

@@ -10,4 +10,4 @@ def test_health_includes_version(client: TestClient) -> None:
     # Envelope middleware wraps payloads.
     data = body.get("data", body)
     assert data["version"] == __version__
-    assert __version__ == "0.4.0"
+    assert __version__ == "0.5.0"

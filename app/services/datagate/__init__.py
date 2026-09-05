@@ -6,6 +6,7 @@ from app.services.datagate.matcher import (
     match_servers,
     monitor_common_name,
     normalize_name,
+    removed_linked_components,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "monitor_common_name",
     "normalize_name",
     "parse_ovpn_endpoint",
+    "removed_linked_components",
 ]

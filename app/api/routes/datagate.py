@@ -1,10 +1,11 @@
 from collections.abc import Generator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_access_roles
+from app.models.account import Account
 from app.schemas.datagate import (
     DatagateImportRequest,
     DatagateImportResponse,
@@ -14,6 +15,7 @@ from app.schemas.datagate import (
     DatagateServerSummary,
     DatagateTestResponse,
 )
+from app.services.audit import audit_scope
 from app.services.datagate.import_service import DatagateIntegrationService
 
 router = APIRouter(prefix="/api/admin/projects/{project_id}/datagate", tags=["admin-datagate"])
@@ -39,10 +41,13 @@ def get_datagate_integration(
 def upsert_datagate_integration(
     project_id: UUID,
     payload: DatagateIntegrationUpsert,
-    _=Depends(require_access_roles("admin", "operator")),
+    request: Request,
+    account: Account = Depends(require_access_roles("admin", "operator")),
     service: DatagateIntegrationService = Depends(get_datagate_service),
 ) -> DatagateIntegrationResponse:
-    return service.to_response(service.upsert(project_id, payload))
+    trace_id = getattr(request.state, "trace_id", None)
+    with audit_scope(source="api", actor_account_id=account.id, trace_id=trace_id):
+        return service.to_response(service.upsert(project_id, payload))
 
 
 @router.post("/test", response_model=DatagateTestResponse)
@@ -76,7 +81,23 @@ def preview_datagate_import(
 def import_datagate_servers(
     project_id: UUID,
     payload: DatagateImportRequest,
-    _=Depends(require_access_roles("admin", "operator")),
+    request: Request,
+    account: Account = Depends(require_access_roles("admin", "operator")),
     service: DatagateIntegrationService = Depends(get_datagate_service),
 ) -> DatagateImportResponse:
-    return service.import_servers(project_id, payload)
+    if payload.delete_removed:
+        roles = {role.slug for role in account.access_roles}
+        if "admin" not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins can delete services removed from DataGate",
+            )
+    trace_id = getattr(request.state, "trace_id", None)
+    with audit_scope(source="api", actor_account_id=account.id, trace_id=trace_id):
+        return service.import_servers(
+            project_id,
+            payload,
+            source="api",
+            actor_account_id=account.id,
+            record_sync_status=False,
+        )

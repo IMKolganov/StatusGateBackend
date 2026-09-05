@@ -1,8 +1,7 @@
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.cqrs.commands.accounts import AccountCommandHandler
 from app.cqrs.common import PaginatedResult, PaginationParams
@@ -20,20 +19,7 @@ class AccountAdminService:
         self._role_queries = AccessRoleQueryHandler(session)
 
     def list(self, params: PaginationParams | None = None) -> PaginatedResult[Account]:
-        pagination = params or PaginationParams()
-        stmt = (
-            select(Account)
-            .options(selectinload(Account.access_roles))
-            .order_by(Account.created_at.desc())
-            .offset(pagination.offset)
-            .limit(pagination.limit)
-        )
-        from sqlalchemy import func
-
-        count_stmt = select(func.count()).select_from(Account)
-        items = list(self._session.scalars(stmt).all())
-        total = self._session.scalar(count_stmt) or 0
-        return PaginatedResult(items=items, total=total, offset=pagination.offset, limit=pagination.limit)
+        return self._queries.list_with_roles_paginated(params)
 
     def get(self, account_id: UUID) -> Account:
         account = self._queries.get_by_id_with_roles(account_id)

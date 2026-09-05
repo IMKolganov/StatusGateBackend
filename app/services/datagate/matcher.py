@@ -240,3 +240,15 @@ def match_servers(
     new_servers = [s for s in servers if s.id not in used_server_ids]
     unmatched_local = [c for c in components if c.id not in used_component_ids]
     return PreviewBuckets(matched=matched, new_servers=new_servers, unmatched_local=unmatched_local)
+
+
+def removed_linked_components(
+    components: list[LocalVpnComponent],
+    enabled_server_ids: set[int],
+) -> list[LocalVpnComponent]:
+    """Locals previously linked to DataGate whose server id is no longer enabled."""
+    return [
+        component
+        for component in components
+        if component.datagate_server_id is not None and component.datagate_server_id not in enabled_server_ids
+    ]

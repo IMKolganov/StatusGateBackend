@@ -14,6 +14,7 @@ from app.services.datagate.matcher import (
     match_servers,
     monitor_common_name,
     normalize_name,
+    removed_linked_components,
     score_pair,
 )
 from app.services.datagate.url_validation import validate_datagate_base_url
@@ -377,3 +378,37 @@ def test_match_servers_does_not_reassign_already_linked_component():
     assert buckets.matched == []
     assert buckets.new_servers[0].id == 2
     assert buckets.unmatched_local[0].datagate_server_id == 1
+
+
+def test_removed_linked_components_only_missing_ids():
+    kept = LocalVpnComponent(
+        id=uuid4(),
+        name="Cyprus",
+        slug="cyprus",
+        check_type="openvpn",
+        datagate_server_id=1,
+    )
+    gone = LocalVpnComponent(
+        id=uuid4(),
+        name="Helsinki 2",
+        slug="helsinki-2",
+        check_type="openvpn",
+        datagate_server_id=87,
+    )
+    never = LocalVpnComponent(
+        id=uuid4(),
+        name="Manual",
+        slug="manual",
+        check_type="openvpn",
+        datagate_server_id=None,
+    )
+    removed = removed_linked_components([kept, gone, never], {1, 94})
+    assert [c.slug for c in removed] == ["helsinki-2"]
+
+
+def test_import_request_delete_wins_over_deactivate():
+    from app.schemas.datagate import DatagateImportRequest
+
+    payload = DatagateImportRequest(deactivate_removed=True, delete_removed=True)
+    assert payload.delete_removed is True
+    assert payload.deactivate_removed is False

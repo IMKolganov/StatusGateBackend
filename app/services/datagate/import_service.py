@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from uuid import UUID
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -11,8 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.probe_defaults import default_probe_url
+from app.cqrs.commands.datagate import DatagateIntegrationCommandHandler
+from app.cqrs.commands.monitored_components import MonitoredComponentCommandHandler
+from app.cqrs.queries.datagate import DatagateIntegrationQueryHandler
+from app.cqrs.queries.projects import ProjectQueryHandler
 from app.models.component_kind import OPENVPN_COMPONENT_KIND_ID, XRAY_COMPONENT_KIND_ID
 from app.models.datagate_integration import DatagateIntegration
+from app.models.entity_change_log import EntityChangeLog
 from app.models.enums import ConnectionMode
 from app.models.monitored_component import MonitoredComponent
 from app.models.project import Project
@@ -28,8 +35,9 @@ from app.schemas.datagate import (
     DatagateServerSummary,
     DatagateTestResponse,
 )
+from app.services.audit import audit_scope, get_audit_context
 from app.services.datagate.client import DataGateApiError, DataGateClient, DataGateServer
-from app.services.datagate.matcher import LocalVpnComponent, match_servers, monitor_common_name
+from app.services.datagate.matcher import LocalVpnComponent, match_servers, monitor_common_name, removed_linked_components
 from app.services.datagate.secrets import decrypt_client_secret, encrypt_client_secret
 from app.services.datagate.url_validation import validate_datagate_base_url
 
@@ -49,19 +57,35 @@ def _preferred_new_slug(server: DataGateServer) -> str:
     return _slugify(f"{base}-dg{server.id}")
 
 
+def _component_snapshot(component: MonitoredComponent) -> dict[str, Any]:
+    return {
+        "id": str(component.id),
+        "name": component.name,
+        "slug": component.slug,
+        "check_type": component.check_type,
+        "is_active": component.is_active,
+        "datagate_server_id": component.datagate_server_id,
+        "datagate_common_name": component.datagate_common_name,
+    }
+
+
 class DatagateIntegrationService:
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._projects = ProjectQueryHandler(session)
+        self._integration_queries = DatagateIntegrationQueryHandler(session)
+        self._integration_commands = DatagateIntegrationCommandHandler(session, auto_commit=False)
+        self._component_commands = MonitoredComponentCommandHandler(session, auto_commit=False)
 
     def _get_project(self, project_id: UUID) -> Project:
-        project = self._session.get(Project, project_id)
+        project = self._projects.get_by_id(project_id)
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         return project
 
     def get_integration(self, project_id: UUID) -> DatagateIntegration | None:
         self._get_project(project_id)
-        return self._session.get(DatagateIntegration, project_id)
+        return self._integration_queries.get_by_project_id(project_id)
 
     def to_response(self, integration: DatagateIntegration) -> DatagateIntegrationResponse:
         return DatagateIntegrationResponse(
@@ -71,13 +95,21 @@ class DatagateIntegrationService:
             client_secret_set=bool(integration.client_secret),
             monitor_cn_prefix=integration.monitor_cn_prefix,
             is_enabled=integration.is_enabled,
+            auto_sync_enabled=integration.auto_sync_enabled,
+            auto_sync_interval_hours=integration.auto_sync_interval_hours,
+            auto_sync_import_new=integration.auto_sync_import_new,
+            auto_sync_deactivate_removed=integration.auto_sync_deactivate_removed,
+            last_synced_at=integration.last_synced_at,
+            last_sync_status=integration.last_sync_status,
+            last_sync_error=integration.last_sync_error,
+            last_sync_batch_id=integration.last_sync_batch_id,
             created_at=integration.created_at,
             updated_at=integration.updated_at,
         )
 
     def upsert(self, project_id: UUID, payload: DatagateIntegrationUpsert) -> DatagateIntegration:
         self._get_project(project_id)
-        integration = self._session.get(DatagateIntegration, project_id)
+        integration = self._integration_queries.get_by_project_id(project_id)
         try:
             base_url = validate_datagate_base_url(payload.base_url)
         except ValueError as exc:
@@ -95,17 +127,23 @@ class DatagateIntegrationService:
                 client_secret=encrypt_client_secret(payload.client_secret),
                 monitor_cn_prefix=payload.monitor_cn_prefix,
                 is_enabled=payload.is_enabled,
+                auto_sync_enabled=payload.auto_sync_enabled,
+                auto_sync_interval_hours=payload.auto_sync_interval_hours,
+                auto_sync_import_new=payload.auto_sync_import_new,
+                auto_sync_deactivate_removed=payload.auto_sync_deactivate_removed,
             )
-            self._session.add(integration)
         else:
             integration.base_url = base_url
             integration.client_id = payload.client_id
             integration.monitor_cn_prefix = payload.monitor_cn_prefix
             integration.is_enabled = payload.is_enabled
+            integration.auto_sync_enabled = payload.auto_sync_enabled
+            integration.auto_sync_interval_hours = payload.auto_sync_interval_hours
+            integration.auto_sync_import_new = payload.auto_sync_import_new
+            integration.auto_sync_deactivate_removed = payload.auto_sync_deactivate_removed
             if payload.client_secret:
                 integration.client_secret = encrypt_client_secret(payload.client_secret)
-        self._session.commit()
-        self._session.refresh(integration)
+        self._integration_commands.save(integration, commit=True)
         return integration
 
     def require_integration(self, project_id: UUID) -> DatagateIntegration:
@@ -214,6 +252,9 @@ class DatagateIntegrationService:
 
         locals_ = [self._to_local(c) for c in self._vpn_components(project_id)]
         buckets = match_servers(servers, locals_)
+        enabled_ids = {s.id for s in servers}
+        removed = removed_linked_components(locals_, enabled_ids)
+        removed_ids = {c.id for c in removed}
 
         name_diffs = [m for m in buckets.matched if m.name_differs]
         sync_question = None
@@ -249,7 +290,10 @@ class DatagateIntegrationService:
                 for m in buckets.matched
             ],
             new_servers=[self._server_summary(s) for s in buckets.new_servers],
-            unmatched_local=[self._local_summary(c) for c in buckets.unmatched_local],
+            unmatched_local=[
+                self._local_summary(c) for c in buckets.unmatched_local if c.id not in removed_ids
+            ],
+            removed_local=[self._local_summary(c) for c in removed],
             sync_names_question=sync_question,
         )
 
@@ -278,7 +322,34 @@ class DatagateIntegrationService:
             candidate = f"{slug}-{n}"[:100]
             n += 1
 
-    def import_servers(self, project_id: UUID, payload: DatagateImportRequest) -> DatagateImportResponse:
+    def import_servers(
+        self,
+        project_id: UUID,
+        payload: DatagateImportRequest,
+        *,
+        source: str = "api",
+        actor_account_id: UUID | None = None,
+        batch_id: UUID | None = None,
+        record_sync_status: bool = False,
+    ) -> DatagateImportResponse:
+        """Shared entrypoint for manual import and worker auto-sync."""
+        batch = batch_id or uuid4()
+        with audit_scope(source=source, actor_account_id=actor_account_id, batch_id=batch):
+            return self._import_servers_inner(
+                project_id,
+                payload,
+                batch_id=batch,
+                record_sync_status=record_sync_status,
+            )
+
+    def _import_servers_inner(
+        self,
+        project_id: UUID,
+        payload: DatagateImportRequest,
+        *,
+        batch_id: UUID,
+        record_sync_status: bool,
+    ) -> DatagateImportResponse:
         project = self._get_project(project_id)
         integration = self.require_integration(project_id)
         client = self._client(integration)
@@ -286,12 +357,18 @@ class DatagateIntegrationService:
         try:
             all_servers = [client.enrich_server(s) for s in client.list_servers() if not s.is_disabled]
         except DataGateApiError as exc:
+            if record_sync_status:
+                integration.last_sync_status = "error"
+                integration.last_sync_error = str(exc)
+                integration.last_sync_batch_id = batch_id
+                self._integration_commands.save(integration, commit=True)
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
         selected_ids = set(payload.server_ids) if payload.server_ids is not None else {s.id for s in all_servers}
         servers = [s for s in all_servers if s.id in selected_ids]
 
         components = self._vpn_components(project_id)
+        before_snapshot = [_component_snapshot(c) for c in components]
         locals_ = [self._to_local(c) for c in components]
         # Match only selected servers so unselected DG servers cannot steal local components.
         buckets = match_servers(servers, locals_)
@@ -301,7 +378,7 @@ class DatagateIntegrationService:
         by_id = {c.id: c for c in components}
         external_id = f"statusgate:{project_id}"
         items: list[DatagateImportItemResult] = []
-        created = updated = skipped = errors = 0
+        created = updated = skipped = errors = deactivated = deleted = 0
         reserved_slugs = {c.slug for c in components}
 
         for match in matched:
@@ -337,7 +414,7 @@ class DatagateIntegrationService:
                     component.datagate_common_name = cn
                 if not action_parts:
                     action_parts.append("linked")
-                self._session.add(component)
+                self._component_commands.update(component, commit=False)
                 updated += 1
                 items.append(
                     DatagateImportItemResult(
@@ -396,8 +473,7 @@ class DatagateIntegrationService:
                     )
                     try:
                         with self._session.begin_nested():
-                            self._session.add(component)
-                            self._session.flush()
+                            self._component_commands.create(component, commit=False)
                     except IntegrityError as exc:
                         errors += 1
                         reserved_slugs.discard(slug)
@@ -442,11 +518,134 @@ class DatagateIntegrationService:
                     )
                 )
 
-        self._session.commit()
+        # Cleanup uses the full enabled DG list — never the partial server_ids selection.
+        enabled_ids = {s.id for s in all_servers}
+        removed_locals = removed_linked_components(locals_, enabled_ids)
+        do_delete = payload.delete_removed
+        do_deactivate = payload.deactivate_removed
+
+        if do_delete or do_deactivate:
+            for local in removed_locals:
+                component = by_id.get(local.id)
+                if component is None:
+                    continue
+                server_id = component.datagate_server_id or 0
+                if do_delete:
+                    try:
+                        with self._session.begin_nested():
+                            self._component_commands.delete(component, commit=False)
+                    except IntegrityError as exc:
+                        errors += 1
+                        detail = str(getattr(exc, "orig", exc))
+                        items.append(
+                            DatagateImportItemResult(
+                                server_id=server_id,
+                                server_name=component.name,
+                                action="error",
+                                component_id=component.id,
+                                message=f"Delete failed: {detail}",
+                            )
+                        )
+                        continue
+                    deleted += 1
+                    items.append(
+                        DatagateImportItemResult(
+                            server_id=server_id,
+                            server_name=component.name,
+                            action="deleted",
+                            component_id=component.id,
+                        )
+                    )
+                    continue
+
+                if not component.is_active:
+                    skipped += 1
+                    items.append(
+                        DatagateImportItemResult(
+                            server_id=server_id,
+                            server_name=component.name,
+                            action="skipped_inactive",
+                            component_id=component.id,
+                        )
+                    )
+                    continue
+                component.is_active = False
+                self._component_commands.update(component, commit=False)
+                deactivated += 1
+                items.append(
+                    DatagateImportItemResult(
+                        server_id=server_id,
+                        server_name=component.name,
+                        action="deactivated",
+                        component_id=component.id,
+                    )
+                )
+
+        after_components = self._vpn_components(project_id)
+        after_snapshot = [_component_snapshot(c) for c in after_components]
+        summary = (
+            f"DataGate import: created={created} updated={updated} skipped={skipped} "
+            f"deactivated={deactivated} deleted={deleted} errors={errors}"
+        )
+        ctx = get_audit_context()
+        self._session.add(
+            EntityChangeLog(
+                actor_account_id=ctx.actor_account_id,
+                source=ctx.source,
+                batch_id=batch_id,
+                entity_type="datagate_import_batch",
+                entity_id=str(batch_id),
+                project_id=project_id,
+                action="sync",
+                before={"components": before_snapshot},
+                after={"components": after_snapshot, "items": [item.model_dump(mode="json") for item in items]},
+                diff={
+                    "created": created,
+                    "updated": updated,
+                    "skipped": skipped,
+                    "deactivated": deactivated,
+                    "deleted": deleted,
+                    "errors": errors,
+                    "removed_detected": len(removed_locals),
+                },
+                trace_id=ctx.trace_id,
+                request_id=ctx.trace_id,
+                summary=summary,
+            )
+        )
+
+        if record_sync_status:
+            integration.last_synced_at = datetime.now(UTC)
+            integration.last_sync_status = "ok" if errors == 0 else "partial_error"
+            integration.last_sync_error = None if errors == 0 else f"{errors} item error(s)"
+            integration.last_sync_batch_id = batch_id
+            self._integration_commands.save(integration, commit=False)
+
+        self._component_commands.commit()
         return DatagateImportResponse(
             items=items,
             created=created,
             updated=updated,
             skipped=skipped,
             errors=errors,
+            deactivated=deactivated,
+            deleted=deleted,
+            batch_id=batch_id,
+        )
+
+    def run_auto_sync(self, project_id: UUID) -> DatagateImportResponse:
+        integration = self.require_integration(project_id)
+        payload = DatagateImportRequest(
+            sync_names=True,
+            refresh_configs=True,
+            import_new=integration.auto_sync_import_new,
+            deactivate_removed=integration.auto_sync_deactivate_removed,
+            delete_removed=False,
+            server_ids=None,
+        )
+        return self.import_servers(
+            project_id,
+            payload,
+            source="worker",
+            record_sync_status=True,
         )

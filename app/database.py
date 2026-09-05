@@ -5,9 +5,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
+from app.services.audit import register_audit_listeners
 
 engine: Engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+register_audit_listeners()
 
 
 def get_db() -> Generator[Session, None, None]:
