@@ -1,6 +1,7 @@
 """Dual-path speed metrics: VPN upload URL, enrich, and host WAN baseline."""
 
 import json
+import os
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -384,6 +385,9 @@ def test_host_wan_baseline_reloads_when_file_mtime_changes(tmp_path, monkeypatch
         "pending_skip_reason": None,
     }
     path.write_text(json.dumps(newer), encoding="utf-8")
+    # Ensure mtime advances even on coarse filesystems / fast writers.
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
     network: dict = {}
     attach_host_wan_baseline_to_network(network)

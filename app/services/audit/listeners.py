@@ -34,9 +34,15 @@ _AUDITED_TYPES: dict[type, str] = {
 }
 
 _SECRET_KEYS = frozenset({"client_secret", "password_hash", "totp_secret", "email_verification_token"})
+_SENSITIVE_PAYLOAD_KEYS = frozenset({"check_config", "config_text"})
 _SKIP_KEYS = frozenset({"created_at", "updated_at"})
 
 _pending: dict[int, list[EntityChangeLog]] = {}
+
+
+def clear_pending_for_session(session: Session) -> None:
+    """Drop queued audit rows for a session (failed flush / rollback)."""
+    _pending.pop(id(session), None)
 
 
 def _entity_type(obj: object) -> str | None:
@@ -60,6 +66,20 @@ def _project_id(obj: object) -> UUID | None:
     return value if isinstance(value, UUID) else None
 
 
+def _redact_value(key: str, value: Any) -> Any:
+    if value is None:
+        return None
+    if key in _SECRET_KEYS or key in _SENSITIVE_PAYLOAD_KEYS:
+        if key == "check_config" and isinstance(value, dict):
+            return {"redacted": True, "keys": sorted(value.keys())}
+        return "***"
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    return value
+
+
 def _serialize(obj: object) -> dict[str, Any]:
     state = inspect(obj)
     data: dict[str, Any] = {}
@@ -67,16 +87,7 @@ def _serialize(obj: object) -> dict[str, Any]:
         key = attr.key
         if key in _SKIP_KEYS:
             continue
-        value = getattr(obj, key, None)
-        if key in _SECRET_KEYS and value is not None:
-            data[key] = "***"
-            continue
-        if isinstance(value, datetime):
-            data[key] = value.isoformat()
-        elif isinstance(value, UUID):
-            data[key] = str(value)
-        else:
-            data[key] = value
+        data[key] = _redact_value(key, getattr(obj, key, None))
     return data
 
 
@@ -108,9 +119,21 @@ def _queue(session: Session, entry: EntityChangeLog) -> None:
 
 
 def _before_flush(session: Session, _flush_context: UOWTransaction, _instances: Any) -> None:
+    # Always start a fresh queue for this flush so a prior failed flush cannot leak.
+    _pending[id(session)] = []
+
     ctx = get_audit_context()
     if not ctx.enabled:
         return
+
+    # Avoid FK violations: do not reference projects that are deleted in this unit of work.
+    deleted_project_ids = {obj.id for obj in session.deleted if isinstance(obj, Project)}
+
+    def project_id_for(obj: object) -> UUID | None:
+        pid = _project_id(obj)
+        if pid is not None and pid in deleted_project_ids:
+            return None
+        return pid
 
     for obj in session.new:
         entity_type = _entity_type(obj)
@@ -125,7 +148,7 @@ def _before_flush(session: Session, _flush_context: UOWTransaction, _instances: 
                 batch_id=ctx.batch_id,
                 entity_type=entity_type,
                 entity_id=_entity_id(obj),
-                project_id=_project_id(obj),
+                project_id=project_id_for(obj),
                 action="create",
                 before=None,
                 after=after,
@@ -152,16 +175,8 @@ def _before_flush(session: Session, _flush_context: UOWTransaction, _instances: 
             current = getattr(obj, key, None)
             if hist.has_changes():
                 old = hist.deleted[0] if hist.deleted else None
-                if key in _SECRET_KEYS:
-                    before[key] = "***" if old is not None else None
-                    after[key] = "***" if current is not None else None
-                else:
-                    before[key] = old.isoformat() if isinstance(old, datetime) else (str(old) if isinstance(old, UUID) else old)
-                    after[key] = (
-                        current.isoformat()
-                        if isinstance(current, datetime)
-                        else (str(current) if isinstance(current, UUID) else current)
-                    )
+                before[key] = _redact_value(key, old)
+                after[key] = _redact_value(key, current)
         if not before and not after:
             continue
         action = _action_for(obj, "update")
@@ -173,7 +188,7 @@ def _before_flush(session: Session, _flush_context: UOWTransaction, _instances: 
                 batch_id=ctx.batch_id,
                 entity_type=entity_type,
                 entity_id=_entity_id(obj),
-                project_id=_project_id(obj),
+                project_id=project_id_for(obj),
                 action=action,
                 before=before or None,
                 after=after or None,
@@ -196,7 +211,7 @@ def _before_flush(session: Session, _flush_context: UOWTransaction, _instances: 
                 batch_id=ctx.batch_id,
                 entity_type=entity_type,
                 entity_id=_entity_id(obj),
-                project_id=_project_id(obj),
+                project_id=project_id_for(obj),
                 action="delete",
                 before=before,
                 after=None,
@@ -213,11 +228,17 @@ def _after_flush(session: Session, _flush_context: UOWTransaction) -> None:
         session.add(entry)
 
 
+def _after_rollback(session: Session, _transaction: Any = None) -> None:
+    clear_pending_for_session(session)
+
+
 def register_audit_listeners() -> None:
     if getattr(register_audit_listeners, "_registered", False):
         return
     event.listen(Session, "before_flush", _before_flush)
     event.listen(Session, "after_flush", _after_flush)
+    event.listen(Session, "after_rollback", _after_rollback)
+    event.listen(Session, "after_soft_rollback", _after_rollback)
     register_audit_listeners._registered = True  # type: ignore[attr-defined]
 
 

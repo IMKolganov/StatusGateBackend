@@ -95,6 +95,7 @@ class TestGlobalExceptionMiddlewareLeftovers:
 
     def test_maps_not_null_integrity_error_message(self) -> None:
         app = FastAPI()
+        app.add_middleware(GlobalExceptionMiddleware)
         app.add_middleware(TraceIdMiddleware)
         register_exception_handlers(app)
 

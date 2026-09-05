@@ -24,6 +24,7 @@ class TestWorkerMain:
             patch("app.worker.__main__.HealthCheckRunner", return_value=mock_runner) as runner_cls,
             patch("app.worker.__main__.MonitoringSettingsRepository", return_value=mock_repo) as repo_cls,
             patch("app.worker.__main__.VpnSessionSupervisor") as supervisor_cls,
+            patch("app.worker.__main__._maybe_run_datagate_autosync") as autosync,
         ):
             supervisor_cls.instance.return_value = mock_supervisor
             from app.worker.__main__ import run_scheduler_cycle
@@ -34,6 +35,7 @@ class TestWorkerMain:
         supervisor_cls.instance.assert_called()
         mock_supervisor.sync.assert_called_once()
         session_local.assert_called_once()
+        autosync.assert_called_once()
         runner_cls.assert_called_once_with(mock_session)
         repo_cls.assert_called_once_with(mock_session)
         mock_repo.get.assert_called_once()

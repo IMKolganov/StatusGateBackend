@@ -217,7 +217,11 @@ def _exception_detail(exc: Exception) -> str:
 
 
 def _integrity_error_message(exc: IntegrityError) -> str:
-    detail = _exception_detail(exc).lower()
+    parts = [_exception_detail(exc)]
+    orig = getattr(exc, "orig", None)
+    if orig is not None:
+        parts.append(str(orig))
+    detail = " ".join(parts).lower()
     if "not-null" in detail or "not null" in detail or "null value" in detail:
         return "A required field was missing or null."
     if "check constraint" in detail or "violates check" in detail:

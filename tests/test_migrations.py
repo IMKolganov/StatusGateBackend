@@ -28,7 +28,7 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_has_single_head() -> None:
     heads = _script_directory().get_heads()
-    assert heads == ["019"], f"expected single head 019, got {heads}"
+    assert heads == ["021"], f"expected single head 021, got {heads}"
 
 
 def test_alembic_revision_ids_are_unique() -> None:
@@ -132,7 +132,7 @@ def test_alembic_upgrade_head_on_empty_database() -> None:
 
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "019"
+        assert version == "021"
 
         columns = {column["name"] for column in inspector.get_columns("monitored_components")}
         assert "speed_test_url_template" in columns
@@ -143,6 +143,11 @@ def test_alembic_upgrade_head_on_empty_database() -> None:
         assert "group_id" in columns
         assert "sort_order" in columns
         assert "component_groups" in inspector.get_table_names()
+        assert "entity_change_logs" in inspector.get_table_names()
+        assert "datagate_integrations" in inspector.get_table_names()
+        dg_columns = {column["name"] for column in inspector.get_columns("datagate_integrations")}
+        assert "auto_sync_enabled" in dg_columns
+        assert "last_sync_batch_id" in dg_columns
         group_columns = {column["name"] for column in inspector.get_columns("component_groups")}
         assert "project_id" in group_columns
         assert "sort_order" in group_columns

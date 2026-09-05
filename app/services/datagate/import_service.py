@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -9,7 +10,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.probe_defaults import default_probe_url
@@ -35,11 +36,31 @@ from app.schemas.datagate import (
     DatagateServerSummary,
     DatagateTestResponse,
 )
-from app.services.audit import audit_scope, get_audit_context
+from app.services.audit import audit_scope, clear_pending_for_session, get_audit_context
 from app.services.datagate.client import DataGateApiError, DataGateClient, DataGateServer
 from app.services.datagate.matcher import LocalVpnComponent, match_servers, monitor_common_name, removed_linked_components
 from app.services.datagate.secrets import decrypt_client_secret, encrypt_client_secret
 from app.services.datagate.url_validation import validate_datagate_base_url
+
+logger = logging.getLogger(__name__)
+
+
+def public_error_message(exc: BaseException) -> str:
+    """User-facing error text without internal stack / secret leakage."""
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+        return exc.phrase or "Request failed"
+    if isinstance(exc, DataGateApiError):
+        text = str(exc).strip() or "DataGate API request failed"
+        return text[:500]
+    if isinstance(exc, IntegrityError):
+        return "Database conflict while saving DataGate changes"
+    if isinstance(exc, SQLAlchemyError):
+        return "Database error while applying DataGate changes"
+    text = str(exc).strip() or exc.__class__.__name__
+    return text[:500]
 
 
 def _slugify(value: str, fallback: str = "service") -> str:
@@ -77,6 +98,25 @@ class DatagateIntegrationService:
         self._integration_commands = DatagateIntegrationCommandHandler(session, auto_commit=False)
         self._component_commands = MonitoredComponentCommandHandler(session, auto_commit=False)
 
+    def _safe_rollback(self) -> None:
+        try:
+            self._session.rollback()
+        finally:
+            clear_pending_for_session(self._session)
+
+    def _persist_sync_failure(self, project_id: UUID, batch_id: UUID, message: str) -> None:
+        try:
+            integration = self._integration_queries.get_by_project_id(project_id)
+            if integration is None:
+                return
+            integration.last_sync_status = "error"
+            integration.last_sync_error = message[:2000]
+            integration.last_sync_batch_id = batch_id
+            self._integration_commands.save(integration, commit=True)
+        except Exception:
+            logger.exception("Failed to persist DataGate sync failure for project=%s", project_id)
+            self._safe_rollback()
+
     def _get_project(self, project_id: UUID) -> Project:
         project = self._projects.get_by_id(project_id)
         if project is None:
@@ -108,43 +148,54 @@ class DatagateIntegrationService:
         )
 
     def upsert(self, project_id: UUID, payload: DatagateIntegrationUpsert) -> DatagateIntegration:
-        self._get_project(project_id)
-        integration = self._integration_queries.get_by_project_id(project_id)
         try:
-            base_url = validate_datagate_base_url(payload.base_url)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-        if integration is None:
-            if not payload.client_secret:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="client_secret is required when creating the integration",
+            self._get_project(project_id)
+            integration = self._integration_queries.get_by_project_id(project_id)
+            try:
+                base_url = validate_datagate_base_url(payload.base_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            if integration is None:
+                if not payload.client_secret:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="client_secret is required when creating the integration",
+                    )
+                integration = DatagateIntegration(
+                    project_id=project_id,
+                    base_url=base_url,
+                    client_id=payload.client_id,
+                    client_secret=encrypt_client_secret(payload.client_secret),
+                    monitor_cn_prefix=payload.monitor_cn_prefix,
+                    is_enabled=payload.is_enabled,
+                    auto_sync_enabled=payload.auto_sync_enabled,
+                    auto_sync_interval_hours=payload.auto_sync_interval_hours,
+                    auto_sync_import_new=payload.auto_sync_import_new,
+                    auto_sync_deactivate_removed=payload.auto_sync_deactivate_removed,
                 )
-            integration = DatagateIntegration(
-                project_id=project_id,
-                base_url=base_url,
-                client_id=payload.client_id,
-                client_secret=encrypt_client_secret(payload.client_secret),
-                monitor_cn_prefix=payload.monitor_cn_prefix,
-                is_enabled=payload.is_enabled,
-                auto_sync_enabled=payload.auto_sync_enabled,
-                auto_sync_interval_hours=payload.auto_sync_interval_hours,
-                auto_sync_import_new=payload.auto_sync_import_new,
-                auto_sync_deactivate_removed=payload.auto_sync_deactivate_removed,
-            )
-        else:
-            integration.base_url = base_url
-            integration.client_id = payload.client_id
-            integration.monitor_cn_prefix = payload.monitor_cn_prefix
-            integration.is_enabled = payload.is_enabled
-            integration.auto_sync_enabled = payload.auto_sync_enabled
-            integration.auto_sync_interval_hours = payload.auto_sync_interval_hours
-            integration.auto_sync_import_new = payload.auto_sync_import_new
-            integration.auto_sync_deactivate_removed = payload.auto_sync_deactivate_removed
-            if payload.client_secret:
-                integration.client_secret = encrypt_client_secret(payload.client_secret)
-        self._integration_commands.save(integration, commit=True)
-        return integration
+            else:
+                integration.base_url = base_url
+                integration.client_id = payload.client_id
+                integration.monitor_cn_prefix = payload.monitor_cn_prefix
+                integration.is_enabled = payload.is_enabled
+                integration.auto_sync_enabled = payload.auto_sync_enabled
+                integration.auto_sync_interval_hours = payload.auto_sync_interval_hours
+                integration.auto_sync_import_new = payload.auto_sync_import_new
+                integration.auto_sync_deactivate_removed = payload.auto_sync_deactivate_removed
+                if payload.client_secret:
+                    integration.client_secret = encrypt_client_secret(payload.client_secret)
+            self._integration_commands.save(integration, commit=True)
+            return integration
+        except HTTPException:
+            self._safe_rollback()
+            raise
+        except Exception as exc:
+            self._safe_rollback()
+            logger.exception("DataGate upsert failed for project=%s", project_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to save DataGate integration: {public_error_message(exc)}",
+            ) from exc
 
     def require_integration(self, project_id: UUID) -> DatagateIntegration:
         integration = self.get_integration(project_id)
@@ -170,13 +221,24 @@ class DatagateIntegrationService:
         )
 
     def test_connection(self, project_id: UUID) -> DatagateTestResponse:
-        integration = self.require_integration(project_id)
-        client = self._client(integration)
         try:
+            integration = self.require_integration(project_id)
+            client = self._client(integration)
             client.get_token()
             servers = client.list_servers()
+        except HTTPException:
+            raise
         except DataGateApiError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"DataGate connection failed: {public_error_message(exc)}",
+            ) from exc
+        except Exception as exc:
+            logger.exception("DataGate connection test failed for project=%s", project_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"DataGate connection test failed: {public_error_message(exc)}",
+            ) from exc
         return DatagateTestResponse(
             ok=True,
             server_count=len(servers),
@@ -184,12 +246,23 @@ class DatagateIntegrationService:
         )
 
     def list_servers(self, project_id: UUID) -> list[DatagateServerSummary]:
-        integration = self.require_integration(project_id)
-        client = self._client(integration)
         try:
+            integration = self.require_integration(project_id)
+            client = self._client(integration)
             servers = [client.enrich_server(s) for s in client.list_servers()]
+        except HTTPException:
+            raise
         except DataGateApiError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to list DataGate servers: {public_error_message(exc)}",
+            ) from exc
+        except Exception as exc:
+            logger.exception("DataGate list_servers failed for project=%s", project_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to list DataGate servers: {public_error_message(exc)}",
+            ) from exc
         return [self._server_summary(s) for s in servers]
 
     def _vpn_components(self, project_id: UUID) -> list[MonitoredComponent]:
@@ -243,59 +316,70 @@ class DatagateIntegrationService:
         )
 
     def preview(self, project_id: UUID) -> DatagatePreviewResponse:
-        integration = self.require_integration(project_id)
-        client = self._client(integration)
         try:
+            integration = self.require_integration(project_id)
+            client = self._client(integration)
             servers = [client.enrich_server(s) for s in client.list_servers() if not s.is_disabled]
+
+            locals_ = [self._to_local(c) for c in self._vpn_components(project_id)]
+            buckets = match_servers(servers, locals_)
+            enabled_ids = {s.id for s in servers}
+            removed = removed_linked_components(locals_, enabled_ids)
+            removed_ids = {c.id for c in removed}
+
+            name_diffs = [m for m in buckets.matched if m.name_differs]
+            sync_question = None
+            if buckets.matched:
+                if name_diffs:
+                    samples = ", ".join(
+                        f"«{m.component.name}» → «{m.server.server_name}»" for m in name_diffs[:5]
+                    )
+                    sync_question = (
+                        f"Found {len(buckets.matched)} already linked servers "
+                        f"(names differ for {len(name_diffs)}: {samples}"
+                        f"{'…' if len(name_diffs) > 5 else ''}). "
+                        "Sync service and server names?"
+                    )
+                else:
+                    sync_question = (
+                        f"Found {len(buckets.matched)} already linked servers. "
+                        "Names match. Refresh configs on import?"
+                    )
+
+            return DatagatePreviewResponse(
+                matched=[
+                    DatagateMatchedPair(
+                        server=self._server_summary(m.server),
+                        component=self._local_summary(m.component),
+                        name_differs=m.name_differs,
+                        suggested_name=m.server.server_name,
+                        endpoint_match=m.endpoint_match,
+                        proto=m.server.proto,
+                        already_linked=m.already_linked,
+                        score=m.score,
+                    )
+                    for m in buckets.matched
+                ],
+                new_servers=[self._server_summary(s) for s in buckets.new_servers],
+                unmatched_local=[
+                    self._local_summary(c) for c in buckets.unmatched_local if c.id not in removed_ids
+                ],
+                removed_local=[self._local_summary(c) for c in removed],
+                sync_names_question=sync_question,
+            )
+        except HTTPException:
+            raise
         except DataGateApiError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-        locals_ = [self._to_local(c) for c in self._vpn_components(project_id)]
-        buckets = match_servers(servers, locals_)
-        enabled_ids = {s.id for s in servers}
-        removed = removed_linked_components(locals_, enabled_ids)
-        removed_ids = {c.id for c in removed}
-
-        name_diffs = [m for m in buckets.matched if m.name_differs]
-        sync_question = None
-        if buckets.matched:
-            if name_diffs:
-                samples = ", ".join(
-                    f"«{m.component.name}» → «{m.server.server_name}»" for m in name_diffs[:5]
-                )
-                sync_question = (
-                    f"Найдено {len(buckets.matched)} уже подключённых серверов "
-                    f"(имена отличаются у {len(name_diffs)}: {samples}"
-                    f"{'…' if len(name_diffs) > 5 else ''}). "
-                    "Синхронизировать имена сервисов и серверов?"
-                )
-            else:
-                sync_question = (
-                    f"Найдено {len(buckets.matched)} уже подключённых серверов. "
-                    "Имена совпадают. Обновить конфиги при импорте?"
-                )
-
-        return DatagatePreviewResponse(
-            matched=[
-                DatagateMatchedPair(
-                    server=self._server_summary(m.server),
-                    component=self._local_summary(m.component),
-                    name_differs=m.name_differs,
-                    suggested_name=m.server.server_name,
-                    endpoint_match=m.endpoint_match,
-                    proto=m.server.proto,
-                    already_linked=m.already_linked,
-                    score=m.score,
-                )
-                for m in buckets.matched
-            ],
-            new_servers=[self._server_summary(s) for s in buckets.new_servers],
-            unmatched_local=[
-                self._local_summary(c) for c in buckets.unmatched_local if c.id not in removed_ids
-            ],
-            removed_local=[self._local_summary(c) for c in removed],
-            sync_names_question=sync_question,
-        )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"DataGate preview failed: {public_error_message(exc)}",
+            ) from exc
+        except Exception as exc:
+            logger.exception("DataGate preview failed for project=%s", project_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"DataGate preview failed: {public_error_message(exc)}",
+            ) from exc
 
     def _unique_slug(
         self,
@@ -335,12 +419,34 @@ class DatagateIntegrationService:
         """Shared entrypoint for manual import and worker auto-sync."""
         batch = batch_id or uuid4()
         with audit_scope(source=source, actor_account_id=actor_account_id, batch_id=batch):
-            return self._import_servers_inner(
-                project_id,
-                payload,
-                batch_id=batch,
-                record_sync_status=record_sync_status,
-            )
+            try:
+                return self._import_servers_inner(
+                    project_id,
+                    payload,
+                    batch_id=batch,
+                    record_sync_status=record_sync_status,
+                )
+            except HTTPException as exc:
+                self._safe_rollback()
+                if record_sync_status:
+                    self._persist_sync_failure(project_id, batch, public_error_message(exc))
+                raise
+            except DataGateApiError as exc:
+                self._safe_rollback()
+                message = f"DataGate import failed: {public_error_message(exc)}"
+                if record_sync_status:
+                    self._persist_sync_failure(project_id, batch, message)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message) from exc
+            except Exception as exc:
+                self._safe_rollback()
+                logger.exception("DataGate import failed for project=%s batch=%s", project_id, batch)
+                message = f"DataGate import failed: {public_error_message(exc)}"
+                if record_sync_status:
+                    self._persist_sync_failure(project_id, batch, message)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=message,
+                ) from exc
 
     def _import_servers_inner(
         self,
@@ -357,12 +463,10 @@ class DatagateIntegrationService:
         try:
             all_servers = [client.enrich_server(s) for s in client.list_servers() if not s.is_disabled]
         except DataGateApiError as exc:
-            if record_sync_status:
-                integration.last_sync_status = "error"
-                integration.last_sync_error = str(exc)
-                integration.last_sync_batch_id = batch_id
-                self._integration_commands.save(integration, commit=True)
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to load DataGate servers: {public_error_message(exc)}",
+            ) from exc
 
         selected_ids = set(payload.server_ids) if payload.server_ids is not None else {s.id for s in all_servers}
         servers = [s for s in all_servers if s.id in selected_ids]
@@ -398,6 +502,9 @@ class DatagateIntegrationService:
                     )
 
                 action_parts: list[str] = []
+                if not component.is_active:
+                    component.is_active = True
+                    action_parts.append("reactivated")
                 if payload.sync_names and match.name_differs:
                     component.name = match.server.server_name
                     action_parts.append("synced_name")
@@ -425,7 +532,10 @@ class DatagateIntegrationService:
                     )
                 )
             except DataGateApiError as exc:
-                self._session.refresh(component)
+                try:
+                    self._session.refresh(component)
+                except Exception:
+                    pass
                 errors += 1
                 items.append(
                     DatagateImportItemResult(
@@ -433,7 +543,27 @@ class DatagateIntegrationService:
                         server_name=match.server.server_name,
                         action="error",
                         component_id=component.id,
-                        message=str(exc),
+                        message=public_error_message(exc),
+                    )
+                )
+            except Exception as exc:
+                try:
+                    self._session.refresh(component)
+                except Exception:
+                    pass
+                logger.exception(
+                    "DataGate import item failed server_id=%s component_id=%s",
+                    match.server.id,
+                    component.id,
+                )
+                errors += 1
+                items.append(
+                    DatagateImportItemResult(
+                        server_id=match.server.id,
+                        server_name=match.server.server_name,
+                        action="error",
+                        component_id=component.id,
+                        message=public_error_message(exc),
                     )
                 )
 
@@ -475,15 +605,15 @@ class DatagateIntegrationService:
                         with self._session.begin_nested():
                             self._component_commands.create(component, commit=False)
                     except IntegrityError as exc:
+                        clear_pending_for_session(self._session)
                         errors += 1
                         reserved_slugs.discard(slug)
-                        detail = str(getattr(exc, "orig", exc))
                         items.append(
                             DatagateImportItemResult(
                                 server_id=server.id,
                                 server_name=server.server_name,
                                 action="error",
-                                message=f"Database conflict: {detail}",
+                                message=f"Database conflict: {public_error_message(exc)}",
                             )
                         )
                         continue
@@ -504,7 +634,18 @@ class DatagateIntegrationService:
                             server_id=server.id,
                             server_name=server.server_name,
                             action="error",
-                            message=str(exc),
+                            message=public_error_message(exc),
+                        )
+                    )
+                except Exception as exc:
+                    logger.exception("DataGate create failed server_id=%s", server.id)
+                    errors += 1
+                    items.append(
+                        DatagateImportItemResult(
+                            server_id=server.id,
+                            server_name=server.server_name,
+                            action="error",
+                            message=public_error_message(exc),
                         )
                     )
         else:
@@ -524,6 +665,16 @@ class DatagateIntegrationService:
         do_delete = payload.delete_removed
         do_deactivate = payload.deactivate_removed
 
+        # Refuse mass wipe when DataGate reports zero enabled servers (outage / empty account).
+        if (do_delete or do_deactivate) and not all_servers and removed_locals:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Refusing to deactivate/delete removed services: DataGate returned "
+                    "zero enabled servers. Verify DataGate inventory, then retry."
+                ),
+            )
+
         if do_delete or do_deactivate:
             for local in removed_locals:
                 component = by_id.get(local.id)
@@ -535,15 +686,15 @@ class DatagateIntegrationService:
                         with self._session.begin_nested():
                             self._component_commands.delete(component, commit=False)
                     except IntegrityError as exc:
+                        clear_pending_for_session(self._session)
                         errors += 1
-                        detail = str(getattr(exc, "orig", exc))
                         items.append(
                             DatagateImportItemResult(
                                 server_id=server_id,
                                 server_name=component.name,
                                 action="error",
                                 component_id=component.id,
-                                message=f"Delete failed: {detail}",
+                                message=f"Delete failed: {public_error_message(exc)}",
                             )
                         )
                         continue
@@ -621,7 +772,14 @@ class DatagateIntegrationService:
             integration.last_sync_batch_id = batch_id
             self._integration_commands.save(integration, commit=False)
 
-        self._component_commands.commit()
+        try:
+            self._component_commands.commit()
+        except Exception as exc:
+            self._safe_rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to commit DataGate import: {public_error_message(exc)}",
+            ) from exc
         return DatagateImportResponse(
             items=items,
             created=created,

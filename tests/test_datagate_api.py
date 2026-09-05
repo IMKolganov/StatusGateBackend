@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -429,8 +431,17 @@ class TestDatagateImportService:
         db_session.commit()
         history_id = history.id
 
+        # Non-empty inventory so safety guard does not treat this as a mass-wipe outage.
+        still_there = DataGateServer(
+            id=99,
+            server_type=0,
+            server_name="Helsinki 9",
+            host="h9.example.com",
+            port=1194,
+            proto="udp",
+        )
         mock_client = MagicMock()
-        mock_client.list_servers.return_value = []
+        mock_client.list_servers.return_value = [still_there]
         mock_client.enrich_server.side_effect = lambda s: s
 
         service = DatagateIntegrationService(db_session)
@@ -452,6 +463,114 @@ class TestDatagateImportService:
         assert local.is_active is False
         assert local.datagate_server_id == 87
         assert db_session.get(CheckResult, history_id) is not None
+
+    def test_refuse_cleanup_when_datagate_returns_zero_enabled(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-empty-guard", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        local = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Helsinki 2",
+            slug="helsinki-2",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote old.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            is_active=True,
+            datagate_server_id=87,
+        )
+        db_session.add(local)
+        db_session.commit()
+
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = []
+        mock_client.enrich_server.side_effect = lambda s: s
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        with pytest.raises(HTTPException) as exc_info:
+            service.import_servers(
+                project.id,
+                DatagateImportRequest(
+                    sync_names=False,
+                    refresh_configs=False,
+                    import_new=False,
+                    deactivate_removed=True,
+                    server_ids=[],
+                ),
+            )
+        assert exc_info.value.status_code == 409
+        assert "zero enabled" in str(exc_info.value.detail).lower()
+        db_session.refresh(local)
+        assert local.is_active is True
+
+    def test_rematch_reactivates_inactive_component(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-reactivate", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        db_session.add(
+            DatagateIntegration(
+                project_id=project.id,
+                base_url="https://api.datagateapp.com",
+                client_id="cid",
+                client_secret=encrypt_client_secret("sec"),
+            )
+        )
+        local = MonitoredComponent(
+            project_id=project.id,
+            component_kind_id=OPENVPN_COMPONENT_KIND_ID,
+            name="Helsinki 2",
+            slug="helsinki-2",
+            check_url="https://probe.example",
+            check_type="openvpn",
+            check_config={"config_text": "proto udp\nremote h2.example.com 1194\n"},
+            timeout_seconds=60,
+            connection_mode="persistent",
+            is_active=False,
+            datagate_server_id=87,
+            datagate_common_name="statusgate-dg-reactivate-87",
+        )
+        db_session.add(local)
+        db_session.commit()
+
+        server = DataGateServer(
+            id=87,
+            server_type=0,
+            server_name="Helsinki 2",
+            host="h2.example.com",
+            port=1194,
+            proto="udp",
+        )
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = [server]
+        mock_client.enrich_server.side_effect = lambda s: s
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        result = service.import_servers(
+            project.id,
+            DatagateImportRequest(
+                sync_names=False,
+                refresh_configs=False,
+                import_new=False,
+                server_ids=None,
+            ),
+        )
+        assert any(item.action == "reactivated" or "reactivated" in item.action for item in result.items)
+        db_session.refresh(local)
+        assert local.is_active is True
 
     def test_delete_removed_cascades_history(self, db_session: Session) -> None:
         from app.models.check_result import CheckResult
@@ -491,8 +610,16 @@ class TestDatagateImportService:
         component_id = local.id
         history_id = history.id
 
+        still_there = DataGateServer(
+            id=99,
+            server_type=0,
+            server_name="Poland 9",
+            host="pl9.example.com",
+            port=1194,
+            proto="udp",
+        )
         mock_client = MagicMock()
-        mock_client.list_servers.return_value = []
+        mock_client.list_servers.return_value = [still_there]
         mock_client.enrich_server.side_effect = lambda s: s
 
         service = DatagateIntegrationService(db_session)

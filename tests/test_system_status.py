@@ -109,7 +109,7 @@ class TestPublicSystemStatus:
         assert body["range_label"] == "Jun 2026"
         assert len(body["groups"]) == 1
         group = body["groups"][0]
-        assert group["name"] == "APIs"
+        assert group["name"] == "Ungrouped"
         assert group["component_count"] == 1
         assert len(group["days"]) == 7
 
