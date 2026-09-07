@@ -77,6 +77,23 @@ def preview_datagate_import(
     return service.preview(project_id)
 
 
+@router.post("/sync", response_model=DatagateImportResponse, status_code=status.HTTP_200_OK)
+def run_datagate_sync(
+    project_id: UUID,
+    request: Request,
+    account: Account = Depends(require_access_roles("admin", "operator")),
+    service: DatagateIntegrationService = Depends(get_datagate_service),
+) -> DatagateImportResponse:
+    """Manually run the same sync the worker would run on its interval."""
+    trace_id = getattr(request.state, "trace_id", None)
+    with audit_scope(source="api", actor_account_id=account.id, trace_id=trace_id):
+        return service.run_auto_sync(
+            project_id,
+            source="api",
+            actor_account_id=account.id,
+        )
+
+
 @router.post("/import", response_model=DatagateImportResponse, status_code=status.HTTP_200_OK)
 def import_datagate_servers(
     project_id: UUID,

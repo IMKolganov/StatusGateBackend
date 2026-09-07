@@ -91,6 +91,62 @@ class TestDatagateIntegrationApi:
         )
         assert response.status_code == 404
 
+    def test_sync_endpoint_runs_auto_sync(
+        self,
+        client: TestClient,
+        admin_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from uuid import uuid4
+
+        from app.schemas.datagate import DatagateImportResponse
+
+        project = _create_project(client, slug="manual-sync")
+        upsert = client.put(
+            f"/api/admin/projects/{project['id']}/datagate",
+            json={
+                "base_url": "https://api.datagateapp.com",
+                "client_id": "cid",
+                "client_secret": "super-secret",
+                "monitor_cn_prefix": "statusgate",
+                "is_enabled": True,
+                "auto_sync_enabled": False,
+                "auto_sync_import_new": True,
+                "auto_sync_deactivate_removed": True,
+            },
+        )
+        assert upsert.status_code == 200, upsert.text
+
+        batch_id = uuid4()
+        captured: dict = {}
+
+        def fake_run_auto_sync(self, project_id, *, source="worker", actor_account_id=None):
+            captured["project_id"] = project_id
+            captured["source"] = source
+            captured["actor_account_id"] = actor_account_id
+            return DatagateImportResponse(
+                items=[],
+                created=0,
+                updated=2,
+                skipped=0,
+                errors=0,
+                deactivated=1,
+                deleted=0,
+                batch_id=batch_id,
+            )
+
+        monkeypatch.setattr(DatagateIntegrationService, "run_auto_sync", fake_run_auto_sync)
+
+        response = client.post(f"/api/admin/projects/{project['id']}/datagate/sync")
+        assert response.status_code == 200, response.text
+        body = _data(response)
+        assert body["updated"] == 2
+        assert body["deactivated"] == 1
+        assert body["batch_id"] == str(batch_id)
+        assert str(captured["project_id"]) == project["id"]
+        assert captured["source"] == "api"
+        assert captured["actor_account_id"] is not None
+
 
 class TestDatagateImportService:
     def test_partial_import_does_not_reassign_linked_component(self, db_session: Session) -> None:
@@ -746,3 +802,71 @@ class TestDatagateRemovedAuth:
         body = response.json()
         assert body["success"] is False
         assert "admin" in body["message"].lower()
+
+
+class TestDatagateManualAutoSync:
+    def test_run_auto_sync_updates_last_sync_fields(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-manual-sync", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        integration = DatagateIntegration(
+            project_id=project.id,
+            base_url="https://api.datagateapp.com",
+            client_id="cid",
+            client_secret=encrypt_client_secret("sec"),
+            is_enabled=True,
+            auto_sync_enabled=False,
+            auto_sync_import_new=False,
+            auto_sync_deactivate_removed=False,
+        )
+        db_session.add(integration)
+        db_session.commit()
+
+        mock_client = MagicMock()
+        mock_client.list_servers.return_value = []
+        mock_client.enrich_server.side_effect = lambda s: s
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        result = service.run_auto_sync(project.id, source="api", actor_account_id=None)
+        assert result.errors == 0
+        assert result.batch_id is not None
+
+        db_session.refresh(integration)
+        assert integration.last_synced_at is not None
+        assert integration.last_sync_status == "ok"
+        assert integration.last_sync_error is None
+        assert integration.last_sync_batch_id == result.batch_id
+
+    def test_run_auto_sync_persists_failure_status(self, db_session: Session) -> None:
+        project = Project(name="DataGate", slug="dg-manual-fail", description=None, is_active=True)
+        db_session.add(project)
+        db_session.flush()
+        integration = DatagateIntegration(
+            project_id=project.id,
+            base_url="https://api.datagateapp.com",
+            client_id="cid",
+            client_secret=encrypt_client_secret("sec"),
+            is_enabled=True,
+            auto_sync_import_new=True,
+            auto_sync_deactivate_removed=True,
+        )
+        db_session.add(integration)
+        db_session.commit()
+
+        mock_client = MagicMock()
+        mock_client.list_servers.side_effect = DataGateApiError("upstream down", status_code=503)
+
+        service = DatagateIntegrationService(db_session)
+        service._client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+        with pytest.raises(HTTPException) as exc_info:
+            service.run_auto_sync(project.id, source="api")
+        assert exc_info.value.status_code == 502
+
+        db_session.refresh(integration)
+        assert integration.last_sync_status == "error"
+        assert integration.last_sync_error is not None
+        assert "upstream down" in integration.last_sync_error
+        assert integration.last_sync_batch_id is not None

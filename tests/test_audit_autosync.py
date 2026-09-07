@@ -111,6 +111,86 @@ def test_auto_sync_payload_never_sets_delete_removed():
     assert payload.refresh_configs is True
     assert captured["kwargs"]["source"] == "worker"
     assert captured["kwargs"]["record_sync_status"] is True
+    assert captured["kwargs"].get("actor_account_id") is None
+
+
+def test_run_auto_sync_manual_api_source_passes_actor():
+    session = MagicMock()
+    service = DatagateIntegrationService(session)
+    project_id = uuid4()
+    actor_id = uuid4()
+    integration = DatagateIntegration(
+        project_id=project_id,
+        base_url="https://api.datagateapp.com",
+        client_id="cid",
+        client_secret="enc",
+        monitor_cn_prefix="statusgate",
+        is_enabled=True,
+        auto_sync_import_new=False,
+        auto_sync_deactivate_removed=True,
+    )
+    service.require_integration = MagicMock(return_value=integration)  # type: ignore[method-assign]
+    captured: dict = {}
+
+    def fake_import(pid, payload, **kwargs):
+        captured["payload"] = payload
+        captured["kwargs"] = kwargs
+        return MagicMock(batch_id=uuid4(), created=0, updated=1, errors=0)
+
+    service.import_servers = fake_import  # type: ignore[method-assign]
+    service.run_auto_sync(project_id, source="api", actor_account_id=actor_id)
+    payload: DatagateImportRequest = captured["payload"]
+    assert payload.delete_removed is False
+    assert payload.import_new is False
+    assert payload.deactivate_removed is True
+    assert captured["kwargs"]["source"] == "api"
+    assert captured["kwargs"]["actor_account_id"] == actor_id
+    assert captured["kwargs"]["record_sync_status"] is True
+
+
+def test_sync_route_forwards_actor_to_run_auto_sync():
+    from unittest.mock import MagicMock
+    from uuid import uuid4
+
+    from fastapi import Request
+
+    from app.api.routes import datagate as datagate_routes
+    from app.schemas.datagate import DatagateImportResponse
+
+    project_id = uuid4()
+    actor_id = uuid4()
+    account = MagicMock()
+    account.id = actor_id
+    request = MagicMock(spec=Request)
+    request.state = MagicMock()
+    request.state.trace_id = "trace-1"
+
+    service = MagicMock()
+    batch_id = uuid4()
+    service.run_auto_sync.return_value = DatagateImportResponse(
+        items=[],
+        created=0,
+        updated=1,
+        skipped=0,
+        errors=0,
+        deactivated=0,
+        deleted=0,
+        batch_id=batch_id,
+    )
+
+    result = datagate_routes.run_datagate_sync(
+        project_id,
+        request,
+        account=account,
+        service=service,
+    )
+    assert result.updated == 1
+    assert result.batch_id == batch_id
+    service.run_auto_sync.assert_called_once_with(
+        project_id,
+        source="api",
+        actor_account_id=actor_id,
+    )
 
 
 def test_import_request_delete_wins():

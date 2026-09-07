@@ -823,7 +823,14 @@ class DatagateIntegrationService:
             batch_id=batch_id,
         )
 
-    def run_auto_sync(self, project_id: UUID) -> DatagateImportResponse:
+    def run_auto_sync(
+        self,
+        project_id: UUID,
+        *,
+        source: str = "worker",
+        actor_account_id: UUID | None = None,
+    ) -> DatagateImportResponse:
+        """Run the scheduled sync payload (also used by manual \"Run sync now\")."""
         integration = self.require_integration(project_id)
         payload = DatagateImportRequest(
             sync_names=True,
@@ -836,6 +843,7 @@ class DatagateIntegrationService:
         return self.import_servers(
             project_id,
             payload,
-            source="worker",
+            source=source,
+            actor_account_id=actor_account_id,
             record_sync_status=True,
         )
