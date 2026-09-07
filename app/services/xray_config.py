@@ -30,15 +30,45 @@ def _normalize_xray_config(config: dict[str, Any]) -> dict[str, Any]:
     if _has_local_proxy_inbound(config):
         return config
 
-    # DataGate Android/dashboard export: {"vless":"vless://...","uuid":"...","endpoint":"..."}
-    vless = config.get("vless")
-    if isinstance(vless, str) and _VLESS_URI_PATTERN.match(vless.strip()):
-        return vless_uri_to_config(vless.strip())
+    vless = _extract_vless_uri_from_profile(config)
+    if vless is not None:
+        return vless_uri_to_config(vless)
 
     if _has_proxy_outbound(config):
         return _ensure_local_socks_inbound(config)
 
     raise ValueError("Xray config must define a socks or http inbound with port")
+
+
+def _extract_vless_uri_from_profile(config: dict[str, Any]) -> str | None:
+    """DataGate Android/dashboard JSON uses vless / vlessXhttp share links, not Xray inbounds."""
+    preferred_keys = ("vless", "vlessXhttp", "vless_uri", "uri", "share", "link")
+    for key in preferred_keys:
+        for candidate_key, value in config.items():
+            if candidate_key.lower() != key.lower():
+                continue
+            if isinstance(value, str):
+                uri = _find_vless_uri(value)
+                if uri:
+                    return uri
+
+    for value in config.values():
+        if isinstance(value, str):
+            uri = _find_vless_uri(value)
+            if uri:
+                return uri
+    return None
+
+
+_VLESS_URI_FIND = re.compile(r"vless://[^\s\"'<>]+", re.IGNORECASE)
+
+
+def _find_vless_uri(text: str) -> str | None:
+    stripped = (text or "").strip()
+    if _VLESS_URI_PATTERN.match(stripped):
+        return stripped.split()[0]
+    match = _VLESS_URI_FIND.search(stripped)
+    return match.group(0) if match else None
 
 
 def _has_local_proxy_inbound(config: dict[str, Any]) -> bool:

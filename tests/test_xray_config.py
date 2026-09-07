@@ -70,6 +70,17 @@ class TestXrayConfigParsing:
         assert config["outbounds"][0]["protocol"] == "vless"
         assert config["outbounds"][0]["settings"]["vnext"][0]["address"] == "xs2.datagateapp.com"
 
+    def test_datagate_profile_falls_back_to_vless_xhttp(self) -> None:
+        raw = json.dumps(
+            {
+                "vless": "",
+                "vlessXhttp": SAMPLE_VLESS,
+                "uuid": "16e5f3d7-0000-4000-8000-000000d4c3d",
+            }
+        )
+        config = parse_xray_config_text(raw)
+        assert config["outbounds"][0]["settings"]["vnext"][0]["address"] == "xs2.datagateapp.com"
+
     def test_outbound_only_json_gets_socks_inbound(self) -> None:
         raw = json.dumps(
             {
