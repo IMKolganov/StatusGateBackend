@@ -371,7 +371,9 @@ def _xray_proxy_url(config: dict[str, Any]) -> str | None:
             continue
         protocol = inbound.get("protocol")
         port = inbound.get("port")
-        if not isinstance(port, int):
+        if isinstance(port, str) and port.strip().isdigit():
+            port = int(port.strip())
+        if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
             continue
         listen = inbound.get("listen") or "127.0.0.1"
         if listen in {"0.0.0.0", "::"}:

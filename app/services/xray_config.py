@@ -9,20 +9,116 @@ _VLESS_URI_PATTERN = re.compile(r"^vless://", re.IGNORECASE)
 
 
 def parse_xray_config_text(config_text: str) -> dict[str, Any]:
-    """Accept full Xray JSON or a vless:// share link (like .ovpn for OpenVPN)."""
+    """Accept full Xray JSON, DataGate Android JSON profile, or a vless:// share link."""
     stripped = (config_text or "").strip()
     # Pretty-printed JSON must be parsed as a whole — do not take only the first "{".
     if stripped.startswith("{"):
         parsed = json.loads(stripped)
         if not isinstance(parsed, dict):
             raise ValueError("Xray JSON config must be an object")
-        return parsed
+        return _normalize_xray_config(parsed)
 
     line = _extract_config_input(config_text)
     if _VLESS_URI_PATTERN.match(line):
         return vless_uri_to_config(line)
 
     raise ValueError("Xray config must be JSON or a vless:// share link")
+
+
+def _normalize_xray_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Turn DataGate export profiles / outbound-only JSON into a runnable local proxy config."""
+    if _has_local_proxy_inbound(config):
+        return config
+
+    # DataGate Android/dashboard export: {"vless":"vless://...","uuid":"...","endpoint":"..."}
+    vless = config.get("vless")
+    if isinstance(vless, str) and _VLESS_URI_PATTERN.match(vless.strip()):
+        return vless_uri_to_config(vless.strip())
+
+    if _has_proxy_outbound(config):
+        return _ensure_local_socks_inbound(config)
+
+    raise ValueError("Xray config must define a socks or http inbound with port")
+
+
+def _has_local_proxy_inbound(config: dict[str, Any]) -> bool:
+    for inbound in config.get("inbounds") or []:
+        if not isinstance(inbound, dict):
+            continue
+        protocol = inbound.get("protocol")
+        if protocol not in {"socks", "http"}:
+            continue
+        if _coerce_port(inbound.get("port")) is not None:
+            return True
+    return False
+
+
+def _has_proxy_outbound(config: dict[str, Any]) -> bool:
+    skip = {"freedom", "blackhole", "dns", "loopback"}
+    for outbound in config.get("outbounds") or []:
+        if not isinstance(outbound, dict):
+            continue
+        protocol = outbound.get("protocol")
+        if isinstance(protocol, str) and protocol.lower() not in skip:
+            return True
+    return False
+
+
+def _coerce_port(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and 1 <= value <= 65535:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        port = int(value.strip())
+        if 1 <= port <= 65535:
+            return port
+    return None
+
+
+def _ensure_local_socks_inbound(config: dict[str, Any]) -> dict[str, Any]:
+    """Inject a local SOCKS inbound so StatusGate can probe through the tunnel."""
+    normalized = dict(config)
+    inbounds = list(normalized.get("inbounds") or [])
+    inbounds.insert(
+        0,
+        {
+            "tag": "socks-in",
+            "listen": DEFAULT_SOCKS_LISTEN,
+            "port": DEFAULT_SOCKS_PORT,
+            "protocol": "socks",
+            "settings": {"udp": True},
+        },
+    )
+    normalized["inbounds"] = inbounds
+
+    outbounds = [dict(item) if isinstance(item, dict) else item for item in (normalized.get("outbounds") or [])]
+    proxy_tag = None
+    for outbound in outbounds:
+        if not isinstance(outbound, dict):
+            continue
+        protocol = outbound.get("protocol")
+        if not isinstance(protocol, str) or protocol.lower() in {"freedom", "blackhole", "dns", "loopback"}:
+            continue
+        proxy_tag = outbound.get("tag") or "proxy"
+        outbound["tag"] = proxy_tag
+        break
+    normalized["outbounds"] = outbounds
+
+    if proxy_tag:
+        routing = dict(normalized.get("routing") or {})
+        rules = list(routing.get("rules") or [])
+        rules.insert(
+            0,
+            {
+                "type": "field",
+                "inboundTag": ["socks-in"],
+                "outboundTag": proxy_tag,
+            },
+        )
+        routing["rules"] = rules
+        normalized["routing"] = routing
+    return normalized
 
 
 def _extract_config_input(config_text: str) -> str:
