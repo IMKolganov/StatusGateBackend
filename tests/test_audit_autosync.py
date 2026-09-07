@@ -125,6 +125,15 @@ def test_public_error_message_datagate_and_generic():
     assert "ValueError" in public_error_message(ValueError()) or public_error_message(ValueError()) == "ValueError"
 
 
+def test_should_reset_vpn_probe_url():
+    from app.services.datagate.import_service import _should_reset_vpn_probe_url
+
+    assert _should_reset_vpn_probe_url(None, "https://s1-nor.datagateapp.com/") is True
+    assert _should_reset_vpn_probe_url("https://s1-nor.datagateapp.com/", "https://s1-nor.datagateapp.com/") is True
+    assert _should_reset_vpn_probe_url("https://s1-nor.datagateapp.com", "https://s1-nor.datagateapp.com/") is True
+    assert _should_reset_vpn_probe_url("https://ifconfig.me/ip", "https://s1-nor.datagateapp.com/") is False
+
+
 def test_import_servers_unexpected_error_returns_http_500():
     session = MagicMock()
     service = DatagateIntegrationService(session)

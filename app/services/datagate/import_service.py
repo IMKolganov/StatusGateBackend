@@ -63,6 +63,19 @@ def public_error_message(exc: BaseException) -> str:
     return text[:500]
 
 
+def _normalize_url(value: str | None) -> str:
+    return (value or "").strip().rstrip("/")
+
+
+def _should_reset_vpn_probe_url(check_url: str | None, api_url: str | None) -> bool:
+    """True when check_url is empty or still points at the DataGate apiUrl probe."""
+    current = _normalize_url(check_url)
+    if not current:
+        return True
+    api = _normalize_url(api_url)
+    return bool(api) and current == api
+
+
 def _slugify(value: str, fallback: str = "service") -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug[:100] or fallback
@@ -514,11 +527,15 @@ class DatagateIntegrationService:
                     component.datagate_common_name = cn
                     if match.server.check_type == "openvpn":
                         component.connection_mode = ConnectionMode.PERSISTENT.value
-                    if match.server.api_url:
-                        component.check_url = match.server.api_url
+                    # Do not use DataGate api_url as exit probe — those hosts often time out
+                    # through the tunnel while google/default probes succeed (false "degraded").
+                    if _should_reset_vpn_probe_url(component.check_url, match.server.api_url):
+                        component.check_url = default_probe_url()
                     action_parts.append("refreshed_config")
                 elif not component.datagate_common_name:
                     component.datagate_common_name = cn
+                if not (component.check_url or "").strip():
+                    component.check_url = default_probe_url()
                 if not action_parts:
                     action_parts.append("linked")
                 self._component_commands.update(component, commit=False)
@@ -586,7 +603,7 @@ class DatagateIntegrationService:
                         component_kind_id=kind_id,
                         name=server.server_name,
                         slug=slug,
-                        check_url=(server.api_url or "").strip() or default_probe_url(),
+                        check_url=default_probe_url(),
                         check_method="GET",
                         check_type=server.check_type,
                         check_config={"config_text": config_text},
@@ -721,7 +738,22 @@ class DatagateIntegrationService:
                     )
                     continue
                 component.is_active = False
-                self._component_commands.update(component, commit=False)
+                try:
+                    with self._session.begin_nested():
+                        self._component_commands.update(component, commit=False)
+                except IntegrityError as exc:
+                    clear_pending_for_session(self._session)
+                    errors += 1
+                    items.append(
+                        DatagateImportItemResult(
+                            server_id=server_id,
+                            server_name=component.name,
+                            action="error",
+                            component_id=component.id,
+                            message=f"Deactivate failed: {public_error_message(exc)}",
+                        )
+                    )
+                    continue
                 deactivated += 1
                 items.append(
                     DatagateImportItemResult(

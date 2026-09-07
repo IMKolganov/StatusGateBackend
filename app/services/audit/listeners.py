@@ -35,7 +35,7 @@ _AUDITED_TYPES: dict[type, str] = {
 
 _SECRET_KEYS = frozenset({"client_secret", "password_hash", "totp_secret", "email_verification_token"})
 _SENSITIVE_PAYLOAD_KEYS = frozenset({"check_config", "config_text"})
-_SKIP_KEYS = frozenset({"created_at", "updated_at"})
+_SKIP_KEYS = frozenset({"created_at", "updated_at", "last_checked_at"})
 
 _pending: dict[int, list[EntityChangeLog]] = {}
 

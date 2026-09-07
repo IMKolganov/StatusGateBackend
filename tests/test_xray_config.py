@@ -39,6 +39,21 @@ class TestXrayConfigParsing:
         raw = json.dumps({"inbounds": [{"protocol": "socks", "port": 1080}]})
         assert parse_xray_config_text(raw)["inbounds"][0]["port"] == 1080
 
+    def test_pretty_printed_multiline_json(self) -> None:
+        raw = """
+{
+  "inbounds": [
+    {"protocol": "socks", "port": 1080}
+  ],
+  "outbounds": [
+    {"protocol": "freedom"}
+  ]
+}
+"""
+        config = parse_xray_config_text(raw)
+        assert config["inbounds"][0]["port"] == 1080
+        assert config["outbounds"][0]["protocol"] == "freedom"
+
     def test_invalid_input(self) -> None:
         with pytest.raises(ValueError, match="JSON or a vless://"):
             parse_xray_config_text("not-a-config")
